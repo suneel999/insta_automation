@@ -572,6 +572,23 @@ def _is_broad_listing_request(message: str) -> bool:
     return has_product and (has_listing_verb or has_broad_scope)
 
 
+def _is_affirmative(message: str) -> bool:
+    msg = _normalize(message)
+    affirm = {
+        "yes",
+        "yes please",
+        "yep",
+        "yeah",
+        "sure",
+        "ok",
+        "okay",
+        "please",
+        "do it",
+        "go ahead",
+    }
+    return msg in affirm
+
+
 def _category_product_pool(state: Optional[ConversationState]) -> list:
     if not state or not state.selected_category:
         return PRODUCTS
@@ -689,6 +706,7 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     product_guess = _detect_product(message, state)
     country_guess = _detect_country(message)
     pack_guess = _detect_pack(message)
+    category_guess = _detect_category(message)
 
     # Strong dietary markers should win.
     if ("difference" in msg or "vs" in msg) and "whey" in msg and "isolate" in msg:
@@ -701,6 +719,8 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "price"
     if _contains_fuzzy_keyword(msg, WHERE_BUY_KEYWORDS):
         return "where_to_buy"
+    if _is_affirmative(message):
+        return "confirm"
     if _contains_fuzzy_keyword(msg, SMALLTALK_KEYWORDS):
         return "smalltalk"
     if _contains_fuzzy_keyword(msg, AUTH_KEYWORDS):
@@ -728,7 +748,7 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     if is_short and state.pending_intent == "price":
         # Continue active pricing flow for short replies like "hydro", "uae", "2lb".
         return "price"
-    if product_guess and (state.selected_category or (state.last_asked or "").startswith("discovery_")):
+    if product_guess and state.selected_category and not category_guess:
         return "price"
     return None
 
@@ -766,7 +786,7 @@ memory:
 - last_priced_country: "{state.last_priced_country or ''}"
 
 Rules:
-- Allowed intents: price, discovery, authenticity, greeting, dietary, where_to_buy, smalltalk, null.
+- Allowed intents: price, discovery, authenticity, greeting, dietary, where_to_buy, smalltalk, confirm, null.
 - country must be one of UAE,KSA,Egypt,null.
 - pack must be 2LB/5LB or null.
 - both_packs must be true/false.
@@ -785,7 +805,7 @@ Rules:
 
 
 def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
-    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", "where_to_buy", "smalltalk", None}
+    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", "where_to_buy", "smalltalk", "confirm", None}
     intent = ai_entities.get("intent")
     if intent not in allowed_intents:
         intent = None
@@ -1111,6 +1131,22 @@ def _handle_smalltalk(message: str, state: ConversationState) -> str:
     return _ai_rag_reply(message, state, fallback)
 
 
+def _handle_confirm(state: ConversationState) -> str:
+    if state.last_priced_product:
+        state.pending_intent = "price"
+        state.mode = "transaction"
+        state.selected_product = state.last_priced_product
+        state.selected_pack = state.last_priced_pack
+        state.selected_country = None
+        previous = state.last_priced_country
+        options = [c for c in ["UAE", "KSA", "Egypt"] if c != previous]
+        if options:
+            facts = f"Sure. Which country should I check next for {state.selected_product}: {', '.join(options)}?"
+            state.last_asked = "country"
+            return _grounded_reply(facts)
+    return _handle_smalltalk("ok", state)
+
+
 def _should_clear_pricing_context(intent: Optional[str]) -> bool:
     return intent in {"authenticity", "dietary", "discovery", "where_to_buy"}
 
@@ -1164,6 +1200,20 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         state.selected_category = entities["category"]
 
     intent = entities.get("intent")
+    if entities.get("country") and state.selected_product and intent not in {"authenticity", "dietary", "where_to_buy"}:
+        intent = "price"
+        entities["intent"] = "price"
+    if (
+        entities.get("country")
+        and not entities.get("product")
+        and not state.selected_product
+        and state.selected_category in CATEGORY_PRODUCTS
+        and len(CATEGORY_PRODUCTS[state.selected_category]) == 1
+    ):
+        state.selected_product = CATEGORY_PRODUCTS[state.selected_category][0]
+        state.last_product_mentioned = state.selected_product
+        intent = "price"
+        entities["intent"] = "price"
     if intent == "discovery" and _is_broad_listing_request(message):
         state.selected_category = None
 
@@ -1316,6 +1366,8 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         return finish(_handle_where_to_buy())
     if intent == "smalltalk":
         return finish(_handle_smalltalk(message, state))
+    if intent == "confirm":
+        return finish(_handle_confirm(state))
     if intent == "discovery":
         return finish(_handle_discovery(state))
 
