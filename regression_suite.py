@@ -83,6 +83,84 @@ SCENARIOS = [
     [
         {"user": "gold standard whey 5lb ksa price", "expect_any": ["sar 389.85"]},
     ],
+    [
+        {"user": "hii can u hlp", "expect_any": ["welcome", "hello"]},
+        {"user": "prce hydro in uae", "expect_any": ["aed 336"]},
+    ],
+    [
+        {"user": "plz show protien", "expect_any": ["protein products", "gold standard 100% whey"]},
+        {"user": "price this", "expect_any": ["pick one product", "send the product name"]},
+    ],
+    [
+        {"user": "price whey", "expect_any": ["2lb", "5lb"]},
+        {"user": "both", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "ksa", "expect_any": ["2lb is sar 248.40", "5lb is sar 389.85"]},
+    ],
+    [
+        {"user": "how much creatine", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "ksa", "expect_any": ["do not have a ksa price", "check www.sporter.com"]},
+    ],
+    [
+        {"user": "price bcaa", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "ksa", "expect_any": ["do not have a ksa price", "check www.sporter.com"]},
+    ],
+    [
+        {"user": "price bcaa", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "egypt", "expect_any": ["550 le"]},
+        {"user": "and uae", "expect_any": ["aed 136.50"]},
+    ],
+    [
+        {"user": "is your whey glutan free", "expect_any": ["gluten-free", "cookies and cream"]},
+    ],
+    [
+        {"user": "do you have vegn protien", "expect_any": ["do not currently offer vegan", "vegan protein"]},
+    ],
+    [
+        {"user": "is this original", "expect_any": ["authenticity sticker", "originalon.com"]},
+    ],
+    [
+        {"user": "price optimen", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "uae", "expect_any": ["aed 152.25"]},
+        {"user": "and egypt", "expect_any": ["850 le"]},
+    ],
+    [
+        {"user": "price fishoil saudi", "expect_any": ["sar 113.85"]},
+    ],
+    [
+        {"user": "price glutamin egypt", "expect_any": ["450 le"]},
+    ],
+    [
+        {"user": "serious mass price in egpyt", "expect_any": ["1650 le"]},
+    ],
+    [
+        {"user": "pre workout price", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "uae", "expect_any": ["do not have a uae price", "check www.sporter.com"]},
+    ],
+    [
+        {"user": "gold standard 2lb egypt", "expect_any": ["850 le"]},
+        {"user": "and 5lb", "expect_any": ["1750 le"]},
+    ],
+    [
+        {"user": "price", "expect_any": ["which product", "product price"]},
+        {"user": "that", "expect_any": ["product name", "which product"]},
+    ],
+    [
+        {"user": "protein", "expect_any": ["protein products"]},
+        {"user": "hydro", "expect_any": ["platinum hydrowhey", "details or price", "which country"]},
+    ],
+    [
+        {"user": "price hydro", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "ksa", "expect_any": ["sar 441.60"]},
+        {"user": "and in dubai", "expect_any": ["aed 336"]},
+    ],
+    [
+        {"user": "cost isoalte uae", "expect_any": ["aed 367.50"]},
+    ],
+    [
+        {"user": "i need protien", "expect_any": ["protein products"]},
+        {"user": "gold standard", "expect_any": ["2lb", "5lb"]},
+        {"user": "both prices egypt", "expect_any": ["2lb is 850 le", "5lb is 1750 le"]},
+    ],
 ]
 
 
@@ -110,4 +188,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

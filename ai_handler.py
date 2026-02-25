@@ -265,6 +265,8 @@ def _detect_pack(message: str) -> Optional[str]:
 
 def _wants_both_packs(message: str) -> bool:
     msg = _normalize(message)
+    if msg.strip() == "both":
+        return True
     if "both" in msg and any(k in msg for k in ["price", "prices", "pack", "lb", "size", "2", "5"]):
         return True
     if "2lb" in msg and "5lb" in msg:
@@ -388,6 +390,10 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     words = msg.split()
     is_short = len(words) <= 3
 
+    product_guess = _detect_product(message, state)
+    country_guess = _detect_country(message)
+    pack_guess = _detect_pack(message)
+
     if _contains_fuzzy_keyword(msg, AUTH_KEYWORDS):
         return "authenticity"
     if _contains_fuzzy_keyword(msg, DIETARY_KEYWORDS):
@@ -396,10 +402,12 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "price"
     if _wants_both_packs(message) and (state.pending_intent == "price" or state.selected_product):
         return "price"
-    if re.search(r"\band\b", msg) and (_detect_country(message) or _detect_pack(message)):
+    if product_guess and (country_guess or pack_guess):
+        return "price"
+    if re.search(r"\band\b", msg) and (country_guess or pack_guess):
         return "price"
     if any(k in msg for k in ["what about", "how about"]) and (
-        _detect_product(message, state) or _detect_country(message) or _detect_pack(message)
+        product_guess or country_guess or pack_guess
     ):
         return "price"
     if msg in {"this", "that", "this one", "that one"} and state.pending_intent == "price":
@@ -408,10 +416,12 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "price"
     if _contains_fuzzy_keyword(msg, DISCOVERY_KEYWORDS):
         return "discovery"
-    if _contains_fuzzy_keyword(msg, GREETING_KEYWORDS) and is_short:
+    if _contains_fuzzy_keyword(msg, GREETING_KEYWORDS) and (is_short or len(words) <= 6):
         return "greeting"
     if is_short and state.pending_intent == "price":
         # Continue active pricing flow for short replies like "hydro", "uae", "2lb".
+        return "price"
+    if product_guess and (state.selected_category or (state.last_asked or "").startswith("discovery_")):
         return "price"
     return None
 
@@ -773,6 +783,13 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             state.selected_product = state.last_priced_product
         if not state.selected_pack and state.selected_product == state.last_priced_product and state.last_priced_pack:
             state.selected_pack = state.last_priced_pack
+        if (
+            not state.selected_country
+            and state.last_priced_country
+            and state.selected_product == state.last_priced_product
+            and (entities.get("pack") or entities.get("both_packs"))
+        ):
+            state.selected_country = state.last_priced_country
 
         if not state.selected_product:
             return _ask_for_missing(state, "product")
@@ -817,7 +834,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                 )
             else:
                 facts = (
-                    f"I do not have this country price in the KB for {state.selected_product}. "
+                    f"I do not have a {state.selected_country} price in the KB for {state.selected_product}. "
                     "Share another country (UAE, KSA, or Egypt) and I will check."
                 )
             _clear_pricing_state(state)
