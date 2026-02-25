@@ -12,6 +12,10 @@ import sqlite3
 import threading
 import time
 from typing import Dict, Optional
+try:
+    import redis as redis_lib
+except Exception:
+    redis_lib = None
 from google import genai
 from dotenv import load_dotenv
 from on_knowledge import ON_KNOWLEDGE_BASE
@@ -27,6 +31,9 @@ CONVERSATION_HISTORY = {}  # { user_id: [str] }
 DB_LOCK = threading.Lock()
 STATE_DB_PATH = os.getenv("STATE_DB_PATH", os.path.join(os.path.dirname(__file__), "conversation_state.db"))
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "43200"))
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_PREFIX = os.getenv("STATE_REDIS_PREFIX", "on:conv:")
+_REDIS_CLIENT = None
 
 COUNTRY_ALIASES = {
     "uae": "UAE",
@@ -167,9 +174,42 @@ def _ensure_state_db() -> None:
             conn.close()
 
 
+def _get_redis_client():
+    global _REDIS_CLIENT
+    if _REDIS_CLIENT is not None:
+        return _REDIS_CLIENT
+    if not REDIS_URL or redis_lib is None:
+        return None
+    try:
+        _REDIS_CLIENT = redis_lib.from_url(REDIS_URL, decode_responses=True)
+        _REDIS_CLIENT.ping()
+        return _REDIS_CLIENT
+    except Exception as e:
+        logger.error(f"Redis unavailable, fallback to sqlite: {e}")
+        _REDIS_CLIENT = None
+        return None
+
+
 def _load_user_context(user_id: str):
     if user_id in USER_STATES and user_id in CONVERSATION_HISTORY:
         return USER_STATES[user_id], CONVERSATION_HISTORY[user_id]
+
+    r = _get_redis_client()
+    if r is not None:
+        key = f"{REDIS_PREFIX}{user_id}"
+        try:
+            raw = r.get(key)
+            if raw:
+                payload = json.loads(raw)
+                state = ConversationState.from_dict(payload.get("state", {"user_id": user_id}))
+                history = payload.get("history", [])
+                if not isinstance(history, list):
+                    history = []
+                USER_STATES[user_id] = state
+                CONVERSATION_HISTORY[user_id] = history[-10:]
+                return state, CONVERSATION_HISTORY[user_id]
+        except Exception as e:
+            logger.error(f"Redis read failed for {user_id}: {e}")
 
     _ensure_state_db()
     with DB_LOCK:
@@ -205,6 +245,20 @@ def _load_user_context(user_id: str):
 def _save_user_context(user_id: str, state: ConversationState, history: list) -> None:
     USER_STATES[user_id] = state
     CONVERSATION_HISTORY[user_id] = history[-10:]
+
+    r = _get_redis_client()
+    if r is not None:
+        key = f"{REDIS_PREFIX}{user_id}"
+        payload = {
+            "state": state.to_dict(),
+            "history": history[-10:],
+            "updated_at": int(time.time()),
+        }
+        try:
+            r.set(key, json.dumps(payload, ensure_ascii=True), ex=STATE_TTL_SECONDS)
+            return
+        except Exception as e:
+            logger.error(f"Redis write failed for {user_id}: {e}")
 
     _ensure_state_db()
     with DB_LOCK:
