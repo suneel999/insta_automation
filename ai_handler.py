@@ -34,6 +34,7 @@ STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "43200"))
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_PREFIX = os.getenv("STATE_REDIS_PREFIX", "on:conv:")
 _REDIS_CLIENT = None
+AI_RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("AI_RATE_LIMIT_COOLDOWN_SECONDS", "60"))
 
 COUNTRY_ALIASES = {
     "uae": "UAE",
@@ -153,6 +154,7 @@ MODEL_CANDIDATES = [
 MODEL_CANDIDATES = [m for m in MODEL_CANDIDATES if m]
 WORKING_MODEL = None
 AI_DISABLED = False
+AI_DISABLED_UNTIL = 0
 
 
 def _ensure_state_db() -> None:
@@ -388,7 +390,28 @@ def _parse_pricing_kb(kb_text: str) -> Dict[str, dict]:
     return products
 
 
+def _parse_kb_sections(kb_text: str) -> Dict[str, str]:
+    sections = {}
+    current = None
+    buf = []
+    for line in kb_text.splitlines():
+        line = line.rstrip()
+        m = re.match(r"^=== SECTION:\s*(.+?)\s*===$", line)
+        if m:
+            if current:
+                sections[current] = "\n".join(buf).strip()
+            current = m.group(1).strip()
+            buf = []
+            continue
+        if current:
+            buf.append(line)
+    if current:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
 PRICING_DATA = _parse_pricing_kb(ON_KNOWLEDGE_BASE)
+KB_SECTIONS = _parse_kb_sections(ON_KNOWLEDGE_BASE)
 PRODUCTS = list(PRICING_DATA.keys())
 PRODUCT_BY_NORMALIZED_NAME = {_normalize(p): p for p in PRODUCTS}
 PRODUCT_ALIASES = {
@@ -446,6 +469,7 @@ GREETING_KEYWORDS = ["hi", "hello", "hey"]
 AUTH_KEYWORDS = ["original", "authentic", "sticker", "fake", "genuine"]
 DIETARY_KEYWORDS = ["gluten", "vegan", "diet", "nutritionist", "isolate vs whey", "whey vs isolate"]
 WHERE_BUY_KEYWORDS = ["where buy", "where to buy", "where can i find", "find your products", "available at", "where available"]
+SMALLTALK_KEYWORDS = ["thanks", "thank you", "ok", "okay", "great", "awesome", "cool", "good morning", "good evening"]
 
 
 def _detect_pack(message: str) -> Optional[str]:
@@ -506,7 +530,7 @@ def _contains_dietary_marker(msg: str) -> bool:
 
 def _is_greeting(msg: str) -> bool:
     words = set(msg.split())
-    if words.intersection({"hi", "hello", "hey", "hii", "heyy", "heyyy"}):
+    if words.intersection({"hi", "hello", "hey", "hii", "heyy", "heyyy", "morning", "afternoon", "evening"}):
         return True
     return False
 
@@ -630,6 +654,8 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "price"
     if _contains_fuzzy_keyword(msg, WHERE_BUY_KEYWORDS):
         return "where_to_buy"
+    if _contains_fuzzy_keyword(msg, SMALLTALK_KEYWORDS):
+        return "smalltalk"
     if _contains_fuzzy_keyword(msg, AUTH_KEYWORDS):
         return "authenticity"
     if _contains_fuzzy_keyword(msg, DIETARY_KEYWORDS, cutoff=0.82):
@@ -693,7 +719,7 @@ memory:
 - last_priced_country: "{state.last_priced_country or ''}"
 
 Rules:
-- Allowed intents: price, discovery, authenticity, greeting, dietary, null.
+- Allowed intents: price, discovery, authenticity, greeting, dietary, where_to_buy, smalltalk, null.
 - country must be one of UAE,KSA,Egypt,null.
 - pack must be 2LB/5LB or null.
 - both_packs must be true/false.
@@ -712,7 +738,7 @@ Rules:
 
 
 def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
-    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", "where_to_buy", None}
+    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", "where_to_buy", "smalltalk", None}
     intent = ai_entities.get("intent")
     if intent not in allowed_intents:
         intent = None
@@ -819,8 +845,13 @@ def _grounded_reply(facts: str, style_instruction: str = "") -> str:
 def _generate_with_fallback(contents: str, config: dict):
     global WORKING_MODEL
     global AI_DISABLED
-    if not client or AI_DISABLED:
+    global AI_DISABLED_UNTIL
+    if not client:
         return None
+    if AI_DISABLED and time.time() < AI_DISABLED_UNTIL:
+        return None
+    if AI_DISABLED and time.time() >= AI_DISABLED_UNTIL:
+        AI_DISABLED = False
 
     models = [WORKING_MODEL] + MODEL_CANDIDATES if WORKING_MODEL else MODEL_CANDIDATES
     tried = set()
@@ -837,13 +868,61 @@ def _generate_with_fallback(contents: str, config: dict):
             err = str(e)
             if "RESOURCE_EXHAUSTED" in err or "429" in err:
                 AI_DISABLED = True
-                logger.warning("Gemini quota exhausted; switching to deterministic KB replies.")
+                AI_DISABLED_UNTIL = time.time() + AI_RATE_LIMIT_COOLDOWN_SECONDS
+                logger.warning("Gemini quota exhausted; temporary cooldown enabled for AI calls.")
                 return None
             if "NOT_FOUND" in err:
                 continue
             logger.error(f"Model call failed on {model}: {e}")
             continue
     return None
+
+
+def _retrieve_kb_sections(message: str, limit: int = 3) -> Dict[str, str]:
+    msg_tokens = set([t for t in _normalize(message).split() if len(t) > 2])
+    scored = []
+    for name, body in KB_SECTIONS.items():
+        section_tokens = set([t for t in _normalize(name + " " + body).split() if len(t) > 2])
+        score = len(msg_tokens.intersection(section_tokens))
+        if score > 0:
+            scored.append((name, body, score))
+    scored.sort(key=lambda x: x[2], reverse=True)
+    selected = scored[:limit]
+    return {name: body for name, body, _ in selected}
+
+
+def _ai_rag_reply(message: str, state: ConversationState, fallback: str) -> str:
+    if not client:
+        return fallback
+
+    sections = _retrieve_kb_sections(message, limit=3)
+    if not sections:
+        sections = {
+            "WELCOME/GREETING": KB_SECTIONS.get("WELCOME/GREETING", ""),
+            "PRODUCT OVERVIEW": KB_SECTIONS.get("PRODUCT OVERVIEW", ""),
+        }
+    section_text = "\n\n".join([f"[{k}]\n{v}" for k, v in sections.items()])
+    history_hint = ", ".join(CONVERSATION_HISTORY.get(state.user_id, [])[-4:])
+    prompt = (
+        f"User message: {message}\n"
+        f"Recent conversation: {history_hint}\n"
+        f"Available KB sections:\n{section_text}\n\n"
+        "Answer naturally in max 2 sentences using ONLY these sections. "
+        "If pricing is requested but missing required fields, ask only one missing field."
+    )
+    response = _generate_with_fallback(
+        prompt,
+        {
+            "system_instruction": (
+                "You are Optimum Nutrition assistant. Do not invent products, prices, or policies."
+            ),
+            "temperature": 0.15,
+            "max_output_tokens": 120,
+        },
+    )
+    if response and response.text:
+        return response.text.strip()
+    return fallback
 
 
 def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
@@ -963,6 +1042,21 @@ def _handle_where_to_buy() -> str:
         "Egypt: available through iFIT at www.ifit-eg.com and at El Ezaby, Khalil, Max Muscle, and Bodybuilding House."
     )
     return _grounded_reply(facts)
+
+
+def _handle_smalltalk(message: str, state: ConversationState) -> str:
+    msg = _normalize(message)
+    if any(g in msg.split() for g in ["hi", "hello", "hey", "hii", "heyy", "heyyy"]):
+        fallback = "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
+    elif "good morning" in msg or "morning" in msg:
+        fallback = "Good morning. Tell me the product or price you want and I will help right away."
+    elif "good evening" in msg or "evening" in msg:
+        fallback = "Good evening. Tell me the product or price you want and I will help right away."
+    elif "thank" in msg:
+        fallback = "You are welcome. If you want, I can check another product price now."
+    else:
+        fallback = "Sure. Tell me what product or price details you want next."
+    return _ai_rag_reply(message, state, fallback)
 
 
 def _should_clear_pricing_context(intent: Optional[str]) -> bool:
@@ -1161,6 +1255,8 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         return finish(_handle_dietary())
     if intent == "where_to_buy":
         return finish(_handle_where_to_buy())
+    if intent == "smalltalk":
+        return finish(_handle_smalltalk(message, state))
     if intent == "discovery":
         return finish(_handle_discovery(state))
 
@@ -1178,8 +1274,6 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                 return finish(_grounded_reply(
                     "Hi. To continue pricing, tell me your country: UAE, KSA, or Egypt."
                 ))
-        return finish(_grounded_reply(
-            "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
-        ))
+        return finish(_handle_smalltalk(message, state))
 
-    return finish(_handle_discovery(state))
+    return finish(_ai_rag_reply(message, state, _handle_discovery(state)))
