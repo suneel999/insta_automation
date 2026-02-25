@@ -1,7 +1,6 @@
 """
-Instagram AI Handler for Optimum Nutrition (ON) - PRODUCTION GRADE STATE MACHINE
-Uses a deterministic backend state machine for multi-turn conversations and Slot Filling.
-AI is used as an Entity Extractor and Response Formatter.
+Instagram AI Handler for Optimum Nutrition (ON) - ROBUST PRODUCTION VERSION
+Features: Deterministic State Machine, Slot Filling, and Anti-Truncation Logic.
 """
 
 import os
@@ -19,11 +18,10 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 logger = logging.getLogger(__name__)
 
 # --- MEMORY & CACHE ---
-RESPONSE_CACHE = {}
 USER_STATES = {}  # { user_id: state_dict }
 CONVERSATION_HISTORY = {} # { user_id: [history] }
 
-# Mapping categories to products in the KB
+# Map categories to products
 CATEGORY_MAP = {
     "protein": ["Gold Standard 100% Whey", "Gold Standard Isolate", "Platinum HydroWhey"],
     "gainer": ["Serious Mass"],
@@ -45,26 +43,21 @@ class ConversationState:
         self.pending_intent = None
         self.selected_category = None
         self.selected_product = None
-        self.selected_pack = None
         self.selected_country = None
-        self.last_question = None
-
-    def to_dict(self):
-        return vars(self)
 
 def extract_entities(message: str) -> dict:
-    prompt = f"""Analyze this user message for an Optimum Nutrition support bot.
-Extract the following fields into a valid JSON object:
+    """
+    Use AI to extract structured categories and intent from the message.
+    """
+    prompt = f"""Extract fields from this message into JSON:
 - intent: ("price", "authenticity", "where_to_buy", "dietary", "greeting", or null)
-- category: ("protein", "gainer", "energy", "pre_workout", "recovery", "vitamins", or null)
-- product: (The full name or null)
-- pack_size: (null or value)
+- product: (Full name from KB or null)
 - country: ("UAE", "KSA", "Egypt", or null)
 
 Rules:
-1. If the message is "Price" or "What is the cost?", intent MUST be "price".
-2. If it's a greeting, intent is "greeting".
-3. Extract ANY mentioned country.
+1. If user asks "how much", "cost", "price", intent is "price".
+2. If user mentions "Dubai", "UAE", "KSA", "Saudi", "Egypt", set country.
+3. If user says "hi", "hello", intent is "greeting".
 
 Message: "{message}"
 JSON:"""
@@ -85,7 +78,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if not client:
         return "Please check our official website for the most updated information."
 
-    # 1. State & History Retrieval
+    # 1. Init State/History
     if user_id not in USER_STATES:
         USER_STATES[user_id] = ConversationState(user_id)
         CONVERSATION_HISTORY[user_id] = []
@@ -93,65 +86,65 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     state = USER_STATES[user_id]
     hist = CONVERSATION_HISTORY[user_id]
 
-    # 2. Extract Entities
+    # 2. Extract
     entities = extract_entities(message)
-    logger.info(f"Parsed for {user_id}: {entities}")
+    logger.info(f"Entities for {user_id}: {entities}")
 
-    # 3. State Update Logic
+    # 3. Handle Logic
     if entities.get('intent'): state.pending_intent = entities['intent']
-    if entities.get('category'): state.selected_category = entities['category']
     if entities.get('product'): state.selected_product = entities['product']
     if entities.get('country'): state.selected_country = entities['country']
 
-    # 4. Flow Control (Instruction Generation)
+    # Determine Instruction
     instruction = ""
-    
     if state.pending_intent == "greeting":
-        instruction = "GREET the user warmly using the WELCOME/GREETING section. Ask how you can help."
-        state.pending_intent = None 
+        instruction = "Greet the user warmly using the WELCOME section. Ask how you can help."
+        state.pending_intent = None
     elif state.pending_intent == "price":
         if not state.selected_product:
-            instruction = "The user wants pricing. IDENTIFY the product first. Ask: 'Which product would you like to know the price of?' and list a few examples like Whey or Serious Mass."
+            instruction = "The user wants pricing but hasn't picked a product. Ask: 'Which product would you like to know the price of?' and list 3 popular options from the KB."
         elif not state.selected_country:
-            instruction = f"Target Product: {state.selected_product}. We need the location. ASK: 'Which country are you in (UAE, KSA, or Egypt) to show the correct price?'"
+            instruction = f"User wants price for {state.selected_product}. We need the country. Ask: 'To give you the correct price for {state.selected_product}, which country are you in: UAE, KSA, or Egypt?'"
         else:
-            instruction = f"Target: {state.selected_product} in {state.selected_country}. PROVIDE the exact price from the PRICING section. Do not ask more questions."
-            state.pending_intent = None # Reset after fulfillment
+            instruction = f"Provide the exact price for {state.selected_product} in {state.selected_country} from the PRICING section. Do NOT ask more questions. Use full sentences."
+            state.pending_intent = None # Fulfilled
     else:
-        # General Help/Fallback
-        instruction = "Use the PRODUCT OVERVIEW to briefly list categories. Ask which specific product they need details for. DO NOT repeat the greeting if the history shows you already said hello."
+        # Default Overview
+        instruction = "Use the PRODUCT OVERVIEW to list our main categories (Protein, Energy, Vitamins). Ask which one they are interested in. Do NOT repeat the greeting if already done."
 
-    # 5. Response Generation
-    system_instruction = f"""### YOUR CURRENT TASK (PRIORITY): 
-{instruction}
+    # 4. Generate Final Response
+    system_instruction = f"""You are the official Optimum Nutrition support.
+TASK: {instruction}
 
-### CORE RULES:
-1. Use ONLY the Knowledge Base below.
-2. DO NOT REPEAT the welcome/greeting if history shows you already greeted the user.
-3. NEVER generate cut-off sentences. Max 2 sentences.
-4. If you don't have the info, say "Please check our official website for more details."
+STRICT RULES:
+- ALWAYS COMPLETE YOUR SENTENCES. Do not cut off early.
+- Use ONLY the Knowledge Base below.
+- Do not greet twice.
+- Max 2 sentences.
 
-### KNOWLEDGE BASE:
+KNOWLEDGE BASE:
 {ON_KNOWLEDGE_BASE}
 """
 
     try:
-        # Update history
+        # Update history window
         hist.append(types.Content(role="user", parts=[types.Part(text=message)]))
-        if len(hist) > 6: hist = hist[-6:]
+        if len(hist) > 6: CONVERSATION_HISTORY[user_id] = hist[-6:]
 
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=hist,
             config={
                 "system_instruction": system_instruction,
-                "temperature": 0.0,
-                "max_output_tokens": 150
+                "temperature": 0.1,
+                "max_output_tokens": 400
             }
         )
         
         if response and response.text:
             ai_text = response.text.strip()
+            # Safety log
+            logger.info(f"AI Final Output: {ai_text}")
             hist.append(types.Content(role="model", parts=[types.Part(text=ai_text)]))
             return ai_text
             
