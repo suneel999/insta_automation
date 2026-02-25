@@ -4,81 +4,74 @@ Pure text format for maximum AI retrieval accuracy.
 """
 
 ON_KNOWLEDGE_BASE = """
-=== OPTIMUM NUTRITION OFFICIAL Q&A ===
-
-1. WELCOME/GREETING:
+=== SECTION: WELCOME/GREETING ===
 Hello! Thanks for reaching out to Optimum Nutrition, the #1 brand selling Whey Protein in the world. How can we assist you today?
 
-2. WHERE TO BUY (UAE & KSA):
-Our products are available at www.sporter.com, www.amazon.ae, and Dr. Nutrition. You can also find our products at Life Pharmacies in the UAE.
+=== SECTION: PRODUCT OVERVIEW ===
+Optimum Nutrition (ON) offers a wide range of premium sports nutrition products including:
+- Protein: Gold Standard 100% Whey, Serious Mass (Gainer), Gold Standard Isolate, Platinum HydroWhey.
+- Energy & Aminos: Essential Amin.O. Energy.
+- Pre-Workout: Gold Standard Pre-Workout.
+- Recovery: Gold Standard 100% Casein, Glutamine Powder, BCAA 5000.
+- Vitamins/Health: Opti-Men, Opti-Women, Fish Oil Softgels, Micronized Creatine Powder.
+Which product would you like to know more about or get the pricing for?
 
-3. WHERE TO BUY (EGYPT):
-Our products are available on iFIT's website, iFIT is our exclusive agent in Egypt - you can visit their website, view all the available products along with their prices, and even submit your order. For more information please visit www.ifit-eg.com - you can also find our products available at El Ezaby Pharmacies, Khalil Pharmacies, Max Muscle, and Bodybuilding House.
+=== SECTION: PRICING ===
+1. Gold Standard 100% Whey:
+- 2LB: AED 156.45 / 850 LE / SAR 248.40
+- 5LB: AED 282.88 / 1750 LE / SAR 389.85
 
-4. AUTHENTICITY CHECK:
-All our authentic products come with an authenticity sticker, the sticker contains a code that you can use on our website to affirm the product's authenticity. Please visit http://originalon.com
+2. Serious Mass (Gainer):
+- AED 157.50 / 1650 LE / SAR 294.40
 
-5. NO STICKER POLICY:
-Unfortunately we cannot guarantee a product's authenticity without it having our sticker, please get back to your point of sale.
+3. Gold Standard 100% Casein:
+- AED 173.25 / 1700 LE / SAR 271.40
 
-6. WHEY VS ISOLATE:
-The Gold Standard Isolate offers much lower fat levels and higher protein levels in each serving, it's ultra-filtered Whey Protein.
+4. Essential Amin.O. Energy:
+- AED 84 / 550 LE / SAR 194.35
 
-7. VEGAN PROTEIN:
-Sorry but we don't have vegan protein at the moment. Please follow us to learn more about our latest products. Thanks.
+5. Gold Standard Pre-Workout:
+- 650 LE (Check www.sporter.com for UAE/KSA prices)
 
-8. NUTRITIONAL ADVICE:
-Optimum Nutrition does not offer nutritional advice, kindly visit a certified nutritionist.
+6. Micronized Creatine Powder:
+- 470 LE (Check www.sporter.com for UAE/KSA prices)
 
-9. PRICING - GOLD STANDARD WHEY 2LB:
-The Optimum Nutrition Gold Standard 100% Whey Protein 2LB pack costs AED 156.45 / 850 LE / SAR 248.40. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+7. Gold Standard 100% Isolate:
+- AED 367.50 / 2,200 LE / SAR 362.25
 
-10. PRICING - GOLD STANDARD WHEY 5LB:
-The Optimum Nutrition Gold Standard 100% Whey Protein 5LB pack costs AED 282.88 / 1750 LE / SAR 389.85. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+8. Opti-Men:
+- AED 152.25 / 850 LE / SAR 124.20
 
-11. PRICING - SERIOUS MASS:
-The Optimum Nutrition Serious Mass pack costs AED 157.50 / 1650 LE / SAR 294.40. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+9. Opti-Women:
+- AED 103.95 / 585 LE / SAR 184
 
-12. PRICING - CASEIN:
-The Gold Standard 100% Casein pack costs AED 173.25 / 1700 LE / SAR 271.40. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+10. Fish Oil Softgels:
+- AED 72.45 / 350 LE / SAR 113.85
 
-13. PRICING - AMINO ENERGY:
-The Essential Amin.O. Energy pack costs AED 84 / 550 LE / SAR 194.35. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+11. Glutamine Powder:
+- AED 99.75 / 450 LE / SAR 205.85
 
-14. PRICING - PRE-WORKOUT:
-The Gold Standard Pre-Workout pack costs AED / 650 LE / SAR _______. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+12. BCAA 5000:
+- AED 136.50 / 550 LE
 
-15. PRICING - CREATINE POWDER:
-The Micronized Creatine Powder pack costs AED / 470 LE / SAR _______. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+13. Platinum HydroWhey:
+- AED 336 / 1750 LE / SAR 441.60
 
-16. PRICING - ISOLATE:
-The Gold Standard 100% Isolate pack costs AED 367.50 / 2,200 LE / SAR 362.25. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+(Note: We request you to check the exact current prices on www.sporter.com or www.ifit-eg.com.)
 
-17. PRICING - OPTI-MEN:
-The Opti-Men pack costs AED 152.25/ 850 LE / SAR 124.20. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+=== SECTION: AUTHENTICITY CHECK ===
+All our authentic products come with an authenticity sticker. The sticker contains a code that you can use on our website to affirm the product's authenticity. Please visit http://originalon.com.
 
-18. PRICING - OPTI-WOMEN:
-The Opti-Women pack costs AED 103.95 / 585 LE / SAR 184. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+=== SECTION: NO STICKER POLICY ===
+Unfortunately we cannot guarantee a product's authenticity without it having our sticker. Please get back to your point of sale if the sticker is missing.
 
-19. PRICING - FISH OIL SOFTGELS:
-The Fish Oil Softgels pack costs AED 72.45 / 350 LE / SAR 113.85. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
+=== SECTION: WHERE TO BUY ===
+- UAE & KSA: Available at www.sporter.com, www.amazon.ae, and Dr. Nutrition. You can also find products at Life Pharmacies in the UAE.
+- Egypt: Available through iFIT (exclusive agent) at www.ifit-eg.com. Also available at El Ezaby Pharmacies, Khalil Pharmacies, Max Muscle, and Bodybuilding House.
 
-20. PRICING - GLUTAMINE POWDER:
-The Glutamine Powder pack costs AED 99.75 / 450 LE / SAR 205.85. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
-
-21. PRICING - BCAA 5000:
-The BCAA 5000 pack costs AED 136.50 / 550 LE / SAR _______. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
-
-22. PRICING - HYDROWHEY:
-The Platinum HydroWhey pack costs AED 336 / 1750 LE / SAR 441.60. We request you to check the prices on www.sporter.com / www.ifit-eg.com.
-
-23. GLUTEN-FREE INFO:
-Yes Optimum Nutrition Gold Standard 100% Whey is certified gluten-free (only exception is cookies and cream flavor). The same is mentioned on the pack as well.
-
-=== EXTRA INFO ===
-- Retailer store finder: https://www.optimumnutrition.com/en-us/where-to-buy
-- If a product is not listed: Unfortunately, it is currently unavailable.
-- Price query without product: Which product would you like to know the price of?
-- Exclusive Egypt agent: iFIT (www.ifit-eg.com) for orders, delivery, and offers.
-- Order completion/Thanks: Our Pleasure!
+=== SECTION: DIETARY / COMPLIANCE ===
+- Gluten-Free: Gold Standard 100% Whey is certified gluten-free (except for cookies and cream flavor).
+- Whey vs Isolate: Gold Standard Isolate offers lower fat and higher protein levels per serving compared to standard Whey.
+- Vegan Protein: Sorry but we don't have vegan protein at the moment.
+- Nutritional Advice: Optimum Nutrition does not offer nutritional advice, kindly visit a certified nutritionist.
 """
