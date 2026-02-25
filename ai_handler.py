@@ -1,11 +1,13 @@
 """
-Instagram AI Handler for Optimum Nutrition (ON) - PURE CONTEXT VERSION
-Uses a raw text knowledge base for the highest possible accuracy and flexibility.
+Instagram AI Handler for Optimum Nutrition (ON) - PRODUCTION GRADE STATE MACHINE
+Uses a deterministic backend state machine for multi-turn conversations and Slot Filling.
+AI is used as an Entity Extractor and Response Formatter.
 """
 
 import os
 import logging
 import hashlib
+import json
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -16,9 +18,19 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 logger = logging.getLogger(__name__)
 
-# --- MEMORY & CACHE ---
+# --- CONFIG & MAPPINGS ---
 RESPONSE_CACHE = {}
-CONVERSATION_HISTORY = {} # { user_id: [history] }
+USER_STATES = {}  # { user_id: state_dict }
+
+# Mapping categories to products in the KB
+CATEGORY_MAP = {
+    "protein": ["Gold Standard 100% Whey", "Gold Standard Isolate", "Platinum HydroWhey"],
+    "gainer": ["Serious Mass"],
+    "energy": ["Essential Amin.O. Energy"],
+    "pre_workout": ["Gold Standard Pre-Workout"],
+    "recovery": ["Gold Standard 100% Casein", "Glutamine Powder", "BCAA 5000"],
+    "vitamins": ["Opti-Men", "Opti-Women", "Fish Oil Softgels", "Micronized Creatine Powder"]
+}
 
 # Configure Gemini Client
 api_key = os.getenv('GEMINI_API_KEY', '')
@@ -26,125 +38,166 @@ client = None
 if api_key:
     client = genai.Client(api_key=api_key)
 
+class ConversationState:
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.pending_intent = None
+        self.selected_category = None
+        self.selected_product = None
+        self.selected_pack = None
+        self.selected_country = None
+        self.last_question = None
+
+    def to_dict(self):
+        return vars(self)
+
+    def is_price_ready(self):
+        # Pricing requires: Product and Country
+        # (Pack is optional if only one available or user clarifies)
+        return self.selected_product is not None and self.selected_country is not None
+
+def extract_entities(message: str) -> dict:
+    """
+    Step 1: Use AI to extract structured data from the message.
+    """
+    prompt = f"""Analyze this user message for an Optimum Nutrition support bot.
+Extract the following fields into a valid JSON object:
+- intent: ("price", "authenticity", "where_to_buy", "dietary", "greeting", or null)
+- category: ("protein", "gainer", "energy", "pre_workout", "recovery", "vitamins", or null)
+- product: (The full name of the product from the list below, or null)
+- pack_size: (e.g. "2LB", "5LB", "10LB", "100 softgels", or null)
+- country: ("UAE", "KSA", "Egypt", or null)
+
+Available Products (MUST use these names exactly): 
+Gold Standard 100% Whey, Serious Mass, Gold Standard Isolate, Platinum HydroWhey, 
+Essential Amin.O. Energy, Gold Standard Pre-Workout, Gold Standard 100% Casein, 
+Glutamine Powder, BCAA 5000, Opti-Men, Opti-Women, Fish Oil Softgels, Micronized Creatine Powder.
+
+Context Extraction Rules:
+1. If user asks "price", "cost", "how much", intent is "price".
+2. If user mentions "UAE", "Dubai", "KSA", "Saudi", "Egypt", extract country.
+3. Map "Whey", "Isolate" to category "protein" IF product name isn't fully clear.
+
+Message: "{message}"
+JSON:"""
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',  # Consistent with generation model
+            contents=prompt,
+            config={"temperature": 0.0, "response_mime_type": "application/json"}
+        )
+        if response and response.text:
+            return json.loads(response.text)
+    except Exception as e:
+        logger.error(f"Extraction Error: {e}")
+    return {}
+
 def get_on_ai_response(message: str, user_id: str = "default") -> str:
-    # 1. Local Response Cache (Exact match)
-    msg_hash = hashlib.md5(message.lower().strip().encode()).hexdigest()
-    if msg_hash in RESPONSE_CACHE:
-        logger.info(f"Using cached response for: {message[:30]}")
-        return RESPONSE_CACHE[msg_hash]
-        
     if not client:
         return "Please check our official website for the most updated information."
+
+    # 1. State Retrieval
+    if user_id not in USER_STATES:
+        USER_STATES[user_id] = ConversationState(user_id)
+    state = USER_STATES[user_id]
+
+    # 2. Extract Entities
+    entities = extract_entities(message)
+    logger.info(f"Entities extracted for {user_id}: {entities}")
+
+    # 3. State Update Logic
+    # Update intent only if a new clear intent is found, otherwise persist
+    if entities.get('intent'):
+        state.pending_intent = entities['intent']
+    
+    # Update slots
+    if entities.get('category'): state.selected_category = entities['category']
+    if entities.get('product'): state.selected_product = entities['product']
+    if entities.get('pack_size'): state.selected_pack = entities['pack_size']
+    if entities.get('country'): state.selected_country = entities['country']
+
+    # 4. Deterministic Flow Control
+    instruction = ""
+    decision = "ask_clarification"
+
+    # GREETING
+    if state.pending_intent == "greeting":
+        instruction = "Respond using the WELCOME/GREETING section. Ask how you can help."
+        state.pending_intent = None # Clear after greeting
+
+    # AUTHENTICITY
+    elif state.pending_intent == "authenticity":
+        instruction = "Answer using the AUTHENTICITY CHECK or NO STICKER POLICY sections. Max 2 sentences."
+        state.pending_intent = None
+
+    # DIETARY
+    elif state.pending_intent == "dietary":
+        instruction = "Answer using the DIETARY / COMPLIANCE section only. Do not give medical advice."
+        state.pending_intent = None
+
+    # PRICING (The complex flow)
+    elif state.pending_intent == "price":
+        # 4a. Handle Category Mapping
+        if state.selected_category and not state.selected_product:
+            products_in_cat = CATEGORY_MAP.get(state.selected_category, [])
+            if len(products_in_cat) == 1:
+                state.selected_product = products_in_cat[0]
+            else:
+                instruction = f"We have multiple products in the {state.selected_category} category: {', '.join(products_in_cat)}. Ask which one they want the price for."
+                state.last_question = "product"
         
-    try:
-        # 2. History Management
-        if user_id not in CONVERSATION_HISTORY:
-            CONVERSATION_HISTORY[user_id] = []
-            
-        CONVERSATION_HISTORY[user_id].append(types.Content(role="user", parts=[types.Part(text=message)]))
+        # 4b. Missing Product
+        if not state.selected_product:
+            instruction = "Politely ask which product they would like to know the price of."
+            state.last_question = "product"
         
-        # Keep window of last 6 messages
-        if len(CONVERSATION_HISTORY[user_id]) > 6:
-            CONVERSATION_HISTORY[user_id] = CONVERSATION_HISTORY[user_id][-6:]
-            
-        # 3. Robust Prompting
-        # We use the user's exact provided instruction structure
-        system_instruction = f"""You are the official Optimum Nutrition (ON) support assistant.
+        # 4c. Missing Country
+        elif not state.selected_country:
+            instruction = f"User wants the price for {state.selected_product}. Ask for their country (UAE, KSA, or Egypt) to show the correct price."
+            state.last_question = "country"
+        
+        # 4d. Ready to give Price!
+        else:
+            instruction = f"Provide the exact price for {state.selected_product} in {state.selected_country} from the PRICING section. Max 2 sentences. Include the website disclaimer."
+            decision = "provide_answer"
+            # Clear state after fulfilling intent
+            state.pending_intent = None
+            state.selected_product = None
+            state.selected_category = None
+            state.selected_country = None
 
-You must answer ONLY using the provided Knowledge Base text at the end of this prompt.
-You are NOT allowed to guess, infer, or invent information.
+    # FALLBACK
+    else:
+        instruction = "Use the PRODUCT OVERVIEW to list what we sell and ask which one they need details for. If outside scope, use the website fallback."
 
-CORE BEHAVIOR RULES (NON-NEGOTIABLE):
-- Never generate partial or cut-off sentences.
-- Never invent product names, prices, availability, or advice.
-- Never infer a product list from pricing sections.
-- Never provide nutritional or medical advice.
-- Always reply in a professional tone.
-- Maximum 2 sentences per response.
+    # 5. Response Formatting (AI Step)
+    system_instruction = f"""You are the official Optimum Nutrition (ON) support assistant.
+Your goal is to follow the INSTRUCTION below using ONLY the provided Knowledge Base.
 
-INTENT HANDLING RULES:
-
-1) GREETINGS
-If the user greets (hi, hello, hey):
-→ Respond using the WELCOME/GREETING section.
-
-2) GENERAL / INTRODUCTORY QUESTIONS
-If the user asks:
-- “Tell me about your product”
-- “Tell me about Optimum Nutrition”
-- “What do you have?”
-- “What products do you sell?”
-→ Use ONLY the PRODUCT OVERVIEW section.
-→ Briefly list categories or product names.
-→ End by asking which product they want details or pricing for.
-→ DO NOT use pricing sections.
-→ DO NOT send the user to the website.
-
-3) PRICING QUESTIONS
-Only answer pricing when:
-- The product name is explicitly mentioned.
-If the product is NOT mentioned:
-→ Ask: “Which product would you like to know the price of?”
-If the product IS mentioned:
-→ Use ONLY the matching PRICING section.
-→ Repeat the price exactly as written.
-→ Add the official website disclaimer if present.
-
-4) AUTHENTICITY QUESTIONS
-If the user asks about originality, fake products, or stickers:
-→ Answer using AUTHENTICITY CHECK or NO STICKER POLICY only.
-
-5) DIETARY / COMPLIANCE QUESTIONS
-If the user asks about:
-- Vegan
-- Gluten-free
-- Nutrition advice
-→ Answer ONLY from the relevant KB section.
-→ Never add recommendations or opinions.
-
-6) UNAVAILABLE OR MISSING DATA
-If the product or information is not listed in the KB:
-→ Respond: “Unfortunately, it is currently unavailable.”
-
-7) WEBSITE FALLBACK (STRICT)
-ONLY respond with:
-“Please check our official website for the most updated information.”
-IF AND ONLY IF:
-- The question is clearly outside Optimum Nutrition scope (example: weather, unrelated topics)
-OR
-- The information does not exist anywhere in the Knowledge Base.
-
-FINAL SELF-CHECK BEFORE RESPONDING:
-- Did I use the correct KB section?
-- Did I avoid guessing or inferring?
-- Is the response complete and clear?
-If any check fails, ask a clarification question instead of answering.
-
-=== OPTIMUM NUTRITION OFFICIAL KNOWLEDGE BASE ===
+KB SECTIONS:
 {ON_KNOWLEDGE_BASE}
+
+STRICT RESPONSE RULES:
+- Never generate partial or cut-off sentences.
+- Never guess or invent prices.
+- Be professional and concise. Max 2 sentences.
+- INSTRUCTION: {instruction}
 """
 
-        logger.info(f"AI Call for {user_id}: '{message[:30]}'")
-
+    try:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=CONVERSATION_HISTORY[user_id],
+            contents=message,
             config={
                 "system_instruction": system_instruction,
                 "temperature": 0.0,
-                "max_output_tokens": 200
+                "max_output_tokens": 150
             }
         )
-        
         if response and response.text:
-            ai_text = response.text.strip()
-            # Save to history and cache
-            CONVERSATION_HISTORY[user_id].append(types.Content(role="model", parts=[types.Part(text=ai_text)]))
-            RESPONSE_CACHE[msg_hash] = ai_text
-            return ai_text
-            
-        return "Please check our official website for the most updated information."
-        
+            return response.text.strip()
     except Exception as e:
-        logger.error(f"Gemini Error: {e}")
-        return "Please check our official website for the most updated information."
+        logger.error(f"Response Generation Error: {e}")
+        
+    return "Please check our official website for the most updated information."
