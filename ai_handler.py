@@ -595,6 +595,21 @@ def _detect_product(message: str, state: Optional[ConversationState] = None) -> 
     return None
 
 
+def _has_explicit_product_mention(message: str) -> bool:
+    msg = _normalize(message)
+    if not msg:
+        return False
+    if msg in PRODUCT_ALIASES or msg in PRODUCT_BY_NORMALIZED_NAME:
+        return True
+    for alias in sorted(PRODUCT_ALIASES.keys(), key=len, reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", msg):
+            return True
+    for normalized in sorted(PRODUCT_BY_NORMALIZED_NAME.keys(), key=len, reverse=True):
+        if re.search(rf"\b{re.escape(normalized)}\b", msg):
+            return True
+    return False
+
+
 def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     msg = _normalize(message)
     words = msg.split()
@@ -980,10 +995,14 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     entities = extract_entities(message, state)
     logger.info(f"User {user_id} | State: {state.mode} | Slots: {entities}")
 
+    explicit_product_mention = _has_explicit_product_mention(message)
     if entities.get("product"):
+        previous_product = state.selected_product
         state.selected_product = entities["product"]
-        state.last_product_mentioned = entities["product"]
-        if entities["product"] != state.last_priced_product:
+        if explicit_product_mention:
+            state.last_product_mentioned = entities["product"]
+        # Do not reset pack unless user explicitly switched product in this message.
+        if explicit_product_mention and previous_product and entities["product"] != previous_product:
             state.selected_pack = None
     if entities.get("pack"):
         state.selected_pack = entities["pack"]
@@ -1004,6 +1023,11 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     # even if AI-first intent classification drifts.
     if state.pending_intent == "price":
         msg_norm = _normalize(message)
+        if state.last_asked == "pack" and "both" in msg_norm:
+            entities["both_packs"] = True
+            state.requested_both_packs = True
+            if state.selected_product and _needs_pack(state.selected_product):
+                state.selected_pack = "__BOTH__"
         explicit_non_price = (
             intent in {"dietary", "authenticity", "where_to_buy"}
             or "gluten" in msg_norm
@@ -1025,7 +1049,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                 entities.get("both_packs")
                 or entities.get("country")
                 or entities.get("pack")
-                or msg_norm in {"both", "both prices", "both packs", "price both"}
+                or "both" in msg_norm
             )
         )
         if (
