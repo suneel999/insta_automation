@@ -1,183 +1,505 @@
 """
-Instagram AI Handler for Optimum Nutrition (ON) - PERSONA-DRIVEN ROBUST VERSION
-Implements the "Expert Assistant" persona with strict slot-filling and natural continuation.
+Instagram AI Handler for Optimum Nutrition (ON)
+Retrieval-grounded, memory-aware, and strict about using only KB facts.
 """
 
 import os
-import logging
-import hashlib
+import re
 import json
+import logging
+from typing import Dict, Optional
 from google import genai
-from google.genai import types
 from dotenv import load_dotenv
 from on_knowledge import ON_KNOWLEDGE_BASE
 
 # Load local env
-load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 logger = logging.getLogger(__name__)
 
 # --- MEMORY STORE ---
 USER_STATES = {}  # { user_id: ConversationState }
-CONVERSATION_HISTORY = {} # { user_id: [history_items] }
+CONVERSATION_HISTORY = {}  # { user_id: [str] }
+
+COUNTRY_ALIASES = {
+    "uae": "UAE",
+    "emirates": "UAE",
+    "dubai": "UAE",
+    "ksa": "KSA",
+    "saudi": "KSA",
+    "saudi arabia": "KSA",
+    "egypt": "Egypt",
+    "eg": "Egypt",
+}
+
 
 class ConversationState:
-    def __init__(self, user_id):
+    def __init__(self, user_id: str):
         self.user_id = user_id
-        self.mode = "discovery" # discovery | transaction
+        self.mode = "discovery"  # discovery | transaction
         self.pending_intent = None
         self.selected_category = None
         self.selected_product = None
+        self.selected_pack = None
         self.selected_country = None
         self.last_asked = None
 
-# Configure Gemini Client
-api_key = os.getenv('GEMINI_API_KEY', '')
-client = None
-if api_key:
-    client = genai.Client(api_key=api_key)
 
-def extract_entities(message: str, history=None) -> dict:
-    """
-    Extracts slots and intent. Context-aware to handle 'short replies'.
-    """
-    if not client: return {}
-    
-    # We pass history to extraction to resolve "this one" or "hydro"
-    context = ""
-    if history:
-        # Just the last 2 turns for context
-        context = "\n".join([f"{c.role}: {c.parts[0].text}" for c in history[-2:]])
+# Configure Gemini Client (optional for phrasing)
+api_key = os.getenv("GEMINI_API_KEY", "")
+client = genai.Client(api_key=api_key) if api_key else None
+MODEL_CANDIDATES = [
+    os.getenv("GEMINI_MODEL", "").strip(),
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
+MODEL_CANDIDATES = [m for m in MODEL_CANDIDATES if m]
+WORKING_MODEL = None
+AI_DISABLED = False
 
-    prompt = f"""Context:
-{context}
 
-Message: "{message}"
+def _normalize(text: str) -> str:
+    return re.sub(r"[^a-z0-9\s]", " ", text.lower()).strip()
 
-Extract JSON:
-- intent: (price, discovery, authenticity, greeting, dietary, or null)
-- product: (Full name or null)
-- country: (UAE, KSA, Egypt, or null)
 
-Rules:
-1. If user says 'price', 'cost', 'how much', or 'this' after a cost question, intent is 'price'.
-2. If message is short (e.g., 'hydro', 'whey', 'uae'), map it to the correct field.
-3. If mentioning a category or browsing, intent is 'discovery'.
+def _to_pack(raw: str) -> str:
+    value = raw.upper().replace(" ", "")
+    return value.replace("LBS", "LB")
 
-JSON:"""
 
+def _extract_country(segment: str) -> Optional[str]:
+    clean = _normalize(segment)
+    for alias, canonical in COUNTRY_ALIASES.items():
+        if alias in clean:
+            return canonical
+    return None
+
+
+def _extract_prices(price_blob: str) -> Dict[str, str]:
+    prices = {}
+    for part in [p.strip() for p in price_blob.split("/")]:
+        m = re.match(r"^(AED|SAR)\s*([0-9][0-9,]*\.?[0-9]*)$", part, flags=re.IGNORECASE)
+        if m:
+            prices["UAE" if m.group(1).upper() == "AED" else "KSA"] = f"{m.group(1).upper()} {m.group(2)}"
+            continue
+        m = re.match(r"^([0-9][0-9,]*\.?[0-9]*)\s*LE$", part, flags=re.IGNORECASE)
+        if m:
+            prices["Egypt"] = f"{m.group(1)} LE"
+    return prices
+
+
+def _parse_pricing_kb(kb_text: str) -> Dict[str, dict]:
+    products = {}
+    in_pricing = False
+    current_product = None
+
+    for line in kb_text.splitlines():
+        raw = line.strip()
+        if raw == "=== SECTION: PRICING ===":
+            in_pricing = True
+            continue
+        if in_pricing and raw.startswith("=== SECTION:"):
+            break
+        if not in_pricing or not raw:
+            continue
+
+        m_product = re.match(r"^\d+\.\s*(.+):$", raw)
+        if m_product:
+            current_product = m_product.group(1).strip()
+            products[current_product] = {"prices": {}, "packs": {}, "note": None}
+            continue
+
+        if not current_product or not raw.startswith("-"):
+            continue
+
+        content = raw[1:].strip()
+        note_match = re.search(r"\(([^)]*check[^)]*)\)", content, flags=re.IGNORECASE)
+        if note_match:
+            products[current_product]["note"] = note_match.group(1).strip()
+            content = re.sub(r"\([^)]*\)", "", content).strip()
+
+        m_pack = re.match(r"^([0-9]+\s*LB[S]?)\s*:\s*(.+)$", content, flags=re.IGNORECASE)
+        if m_pack:
+            pack = _to_pack(m_pack.group(1))
+            prices = _extract_prices(m_pack.group(2).strip())
+            products[current_product]["packs"][pack] = prices
+            continue
+
+        if ":" in content:
+            content = content.split(":", 1)[1].strip()
+        prices = _extract_prices(content)
+        if prices:
+            products[current_product]["prices"] = prices
+
+    return products
+
+
+PRICING_DATA = _parse_pricing_kb(ON_KNOWLEDGE_BASE)
+PRODUCTS = list(PRICING_DATA.keys())
+PRODUCT_BY_NORMALIZED_NAME = {_normalize(p): p for p in PRODUCTS}
+PRODUCT_ALIASES = {
+    "whey": "Gold Standard 100% Whey",
+    "gold standard whey": "Gold Standard 100% Whey",
+    "gs whey": "Gold Standard 100% Whey",
+    "serious mass": "Serious Mass (Gainer)",
+    "gainer": "Serious Mass (Gainer)",
+    "mass": "Serious Mass (Gainer)",
+    "casein": "Gold Standard 100% Casein",
+    "amino": "Essential Amin.O. Energy",
+    "amino energy": "Essential Amin.O. Energy",
+    "pre workout": "Gold Standard Pre-Workout",
+    "creatine": "Micronized Creatine Powder",
+    "isolate": "Gold Standard 100% Isolate",
+    "opti men": "Opti-Men",
+    "optimen": "Opti-Men",
+    "opti women": "Opti-Women",
+    "optiwomen": "Opti-Women",
+    "fish oil": "Fish Oil Softgels",
+    "glutamine": "Glutamine Powder",
+    "bcaa": "BCAA 5000",
+    "hydro": "Platinum HydroWhey",
+    "hydrowhey": "Platinum HydroWhey",
+    "platinum hydro whey": "Platinum HydroWhey",
+}
+
+
+def _detect_pack(message: str) -> Optional[str]:
+    m = re.search(r"\b([0-9]+\s*lb[s]?)\b", message, flags=re.IGNORECASE)
+    return _to_pack(m.group(1)) if m else None
+
+
+def _detect_country(message: str) -> Optional[str]:
+    msg = _normalize(message)
+    for alias, canonical in COUNTRY_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", msg):
+            return canonical
+    return None
+
+
+def _detect_product(message: str) -> Optional[str]:
+    msg = _normalize(message)
+
+    if msg in PRODUCT_BY_NORMALIZED_NAME:
+        return PRODUCT_BY_NORMALIZED_NAME[msg]
+    if msg in PRODUCT_ALIASES:
+        return PRODUCT_ALIASES[msg]
+
+    for alias, product in sorted(PRODUCT_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", msg):
+            return product
+
+    for normalized, product in PRODUCT_BY_NORMALIZED_NAME.items():
+        if re.search(rf"\b{re.escape(normalized)}\b", msg):
+            return product
+    return None
+
+
+def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
+    msg = _normalize(message)
+    words = msg.split()
+    is_short = len(words) <= 3
+
+    if any(k in msg for k in ["original", "authentic", "sticker", "fake", "genuine"]):
+        return "authenticity"
+    if any(k in msg for k in ["gluten", "vegan", "diet", "nutritionist", "isolate vs whey", "whey vs isolate"]):
+        return "dietary"
+    if any(k in msg for k in ["price", "cost", "how much"]):
+        return "price"
+    if msg in {"this", "that", "this one", "that one"} and state.pending_intent == "price":
+        return "price"
+    if any(k in msg for k in ["browse", "products", "show products", "what do you have", "category"]):
+        return "discovery"
+    if any(k in msg for k in ["hi", "hello", "hey"]) and is_short:
+        return "greeting"
+    if is_short and state.pending_intent == "price":
+        # Continue active pricing flow for short replies like "hydro", "uae", "2lb".
+        return "price"
+    return None
+
+
+def _fallback_ai_extract(message: str, state: ConversationState) -> dict:
+    if not client:
+        return {}
+    prompt = f"""Extract JSON only with keys intent, product, country, pack.
+message: "{message}"
+current_intent: "{state.pending_intent or ''}"
+Allowed intents: price, discovery, authenticity, greeting, dietary, null.
+country must be one of UAE,KSA,Egypt,null.
+pack must be format like 2LB,5LB or null.
+If unsure, return null values."""
     try:
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=prompt,
-            config={"temperature": 0.0, "response_mime_type": "application/json"}
+        response = _generate_with_fallback(
+            prompt,
+            {"temperature": 0.0, "response_mime_type": "application/json"},
         )
-        if response and response.text:
-            return json.loads(response.text)
+        return json.loads(response.text) if response and response.text else {}
     except Exception as e:
-        logger.error(f"Extraction Error: {e}")
-    return {}
+        logger.error(f"AI extraction fallback failed: {e}")
+        return {}
+
+
+def extract_entities(message: str, state: ConversationState) -> dict:
+    entities = {
+        "intent": _detect_intent(message, state),
+        "product": _detect_product(message),
+        "country": _detect_country(message),
+        "pack": _detect_pack(message),
+    }
+
+    if any(entities.values()):
+        return entities
+
+    ai_entities = _fallback_ai_extract(message, state)
+    if ai_entities.get("country") and ai_entities["country"] not in {"UAE", "KSA", "Egypt"}:
+        ai_entities["country"] = None
+    if ai_entities.get("pack"):
+        ai_entities["pack"] = _to_pack(str(ai_entities["pack"]))
+    return {
+        "intent": ai_entities.get("intent"),
+        "product": ai_entities.get("product"),
+        "country": ai_entities.get("country"),
+        "pack": ai_entities.get("pack"),
+    }
+
+
+def _grounded_reply(facts: str, style_instruction: str = "") -> str:
+    if not client:
+        return facts
+    system = (
+        "You are Optimum Nutrition Instagram DM assistant. "
+        "Use ONLY provided facts. Do not add any new data. "
+        "Max 2 sentences. Ask only one missing detail when needed."
+    )
+    prompt = f"Facts:\n{facts}\n\nTask:\n{style_instruction or 'Answer naturally and clearly.'}"
+    try:
+        response = _generate_with_fallback(
+            prompt,
+            {"system_instruction": system, "temperature": 0.1, "max_output_tokens": 120},
+        )
+        text = response.text.strip() if response and response.text else ""
+        return text or facts
+    except Exception as e:
+        logger.error(f"Grounded generation failed: {e}")
+        return facts
+
+
+def _generate_with_fallback(contents: str, config: dict):
+    global WORKING_MODEL
+    global AI_DISABLED
+    if not client or AI_DISABLED:
+        return None
+
+    models = [WORKING_MODEL] + MODEL_CANDIDATES if WORKING_MODEL else MODEL_CANDIDATES
+    tried = set()
+    for model in models:
+        if not model or model in tried:
+            continue
+        tried.add(model)
+        try:
+            response = client.models.generate_content(model=model, contents=contents, config=config)
+            if response:
+                WORKING_MODEL = model
+                return response
+        except Exception as e:
+            err = str(e)
+            if "RESOURCE_EXHAUSTED" in err or "429" in err:
+                AI_DISABLED = True
+                logger.warning("Gemini quota exhausted; switching to deterministic KB replies.")
+                return None
+            if "NOT_FOUND" in err:
+                continue
+            logger.error(f"Model call failed on {model}: {e}")
+            continue
+    return None
+
+
+def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
+    repeat = state.last_asked == missing_field
+    state.last_asked = missing_field
+
+    if missing_field == "product":
+        facts = (
+            "I need the product name to continue. "
+            "You can send one: Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey."
+        )
+        if not repeat:
+            facts = (
+                "Which product price do you want? "
+                "You can choose Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey."
+            )
+        return _grounded_reply(facts)
+
+    if missing_field == "pack":
+        facts = f"I need the pack size for {state.selected_product}: 2LB or 5LB."
+        if not repeat:
+            facts = f"For {state.selected_product}, which pack do you want: 2LB or 5LB?"
+        return _grounded_reply(facts)
+
+    facts = "I need your country to give exact pricing: UAE, KSA, or Egypt."
+    if not repeat:
+        facts = "To give the exact price, which country are you in: UAE, KSA, or Egypt?"
+    return _grounded_reply(facts)
+
+
+def _needs_pack(product: str) -> bool:
+    product_data = PRICING_DATA.get(product, {})
+    return len(product_data.get("packs", {})) > 1
+
+
+def _resolve_price(product: str, country: str, pack: Optional[str]) -> dict:
+    product_data = PRICING_DATA.get(product, {})
+    packs = product_data.get("packs", {})
+    prices = product_data.get("prices", {})
+    note = product_data.get("note")
+
+    if packs:
+        if not pack:
+            if len(packs) == 1:
+                pack = next(iter(packs.keys()))
+            else:
+                return {"status": "missing_pack"}
+        if pack not in packs:
+            return {"status": "unknown_pack"}
+        country_prices = packs[pack]
+        if country not in country_prices:
+            return {"status": "missing_country_price", "note": note}
+        return {"status": "ok", "value": country_prices[country], "pack": pack, "note": note}
+
+    if country not in prices:
+        return {"status": "missing_country_price", "note": note}
+    return {"status": "ok", "value": prices[country], "pack": None, "note": note}
+
+
+def _handle_discovery() -> str:
+    facts = (
+        "Our main categories are Protein, Energy & Aminos, Pre-Workout, Recovery, and Vitamins/Health. "
+        "Tell me the category or product and I can continue with details or price."
+    )
+    return _grounded_reply(facts)
+
+
+def _handle_authenticity() -> str:
+    facts = (
+        "Authentic ON products have an authenticity sticker with a code you can verify at originalon.com. "
+        "If the sticker is missing, authenticity cannot be guaranteed."
+    )
+    return _grounded_reply(facts)
+
+
+def _handle_dietary() -> str:
+    facts = (
+        "Gold Standard 100% Whey is certified gluten-free except Cookies and Cream flavor. "
+        "We do not currently offer vegan protein."
+    )
+    return _grounded_reply(facts)
+
+
+def _should_clear_pricing_context(intent: Optional[str]) -> bool:
+    return intent in {"authenticity", "dietary", "discovery"}
+
+
+def _clear_pricing_state(state: ConversationState) -> None:
+    state.pending_intent = None
+    state.selected_product = None
+    state.selected_pack = None
+    state.selected_country = None
+    state.last_asked = None
+    state.mode = "discovery"
+
 
 def get_on_ai_response(message: str, user_id: str = "default") -> str:
-    if not client:
-        return "Please check our official website for the most updated information."
-
-    # 1. State/History Retrieval
     if user_id not in USER_STATES:
         USER_STATES[user_id] = ConversationState(user_id)
         CONVERSATION_HISTORY[user_id] = []
-    
+
     state = USER_STATES[user_id]
-    hist = CONVERSATION_HISTORY[user_id]
+    history = CONVERSATION_HISTORY[user_id]
+    history.append(message)
+    if len(history) > 10:
+        CONVERSATION_HISTORY[user_id] = history[-10:]
 
-    # 2. Extract (Context-Aware)
-    entities = extract_entities(message, hist)
-    logger.info(f"User {user_id} | State: {state.mode} | Intent: {entities.get('intent')} | Slots: {entities}")
+    entities = extract_entities(message, state)
+    logger.info(f"User {user_id} | State: {state.mode} | Slots: {entities}")
 
-    # 3. Logic: Slot Filling & Continuity
-    # Persist intent if it's already transaction mode and message is a short reply
-    if entities.get('intent') == "price":
+    if entities.get("product"):
+        state.selected_product = entities["product"]
+        state.selected_pack = None
+    if entities.get("pack"):
+        state.selected_pack = entities["pack"]
+    if entities.get("country"):
+        state.selected_country = entities["country"]
+
+    intent = entities.get("intent")
+
+    if _should_clear_pricing_context(intent):
+        _clear_pricing_state(state)
+
+    if intent == "price" or state.pending_intent == "price":
         state.mode = "transaction"
         state.pending_intent = "price"
-    
-    # Short reply handling: if we were waiting for a product and user says "hydro", extract handles it.
-    if entities.get('product'): state.selected_product = entities['product']
-    if entities.get('country'): state.selected_country = entities['country']
 
-    # 4. Instruction Generation
-    instruction = ""
-    
-    if entities.get('intent') == "greeting":
-        instruction = "GREET the user warmly. Use the WELCOME/GREETING section from the KB."
-        state.mode = "discovery" # Reset to discovery on new greeting
-    
-    elif state.mode == "transaction" or state.pending_intent == "price":
         if not state.selected_product:
-            instruction = "We are in pricing mode. WE NEED THE PRODUCT. Ask: 'Which product would you like to know the price of?' List 2-3 specific options like Gold Standard Whey or Serious Mass."
-            state.last_asked = "product"
-        elif not state.selected_country:
-            instruction = f"We have the product: {state.selected_product}. WE NEED THE COUNTRY. Ask: 'To give you the exact price, which country are you in: UAE, KSA, or Egypt?'"
-            state.last_asked = "country"
-        else:
-            instruction = f"FULFILL PRICE: Provide the exact price for {state.selected_product} in {state.selected_country} from the PRICING section. Add the website disclaimer. Then reset the pricing flow."
-            # Reset after fulfillment
-            state.pending_intent = None
-            state.selected_product = None
-            state.selected_country = None
-            state.mode = "discovery"
+            return _ask_for_missing(state, "product")
 
-    else:
-        # Discovery / General Help
-        if entities.get('intent') == "authenticity":
-            instruction = "Explain the AUTHENTICITY policy and the 6-digit code. Max 2 sentences."
-        else:
-            instruction = "DISCOVERY: Help the user browse products. List our main categories (Protein, Energy, Vitamins) and specific products in them. Ask what they are interested in."
+        if _needs_pack(state.selected_product) and not state.selected_pack:
+            return _ask_for_missing(state, "pack")
 
-    # 5. Final Generation with the "Expert Assistant" Persona
-    system_instruction = f"""You are the official Optimum Nutrition (ON) support assistant. 
-You must follow the TASK MISSION below using ONLY the provided Knowledge Base.
+        if not state.selected_country:
+            return _ask_for_missing(state, "country")
 
-### RULES:
-- Always use conversation memory to understand follow-up questions.
-- Treat short replies like "price", "this", "that", "hydro" as continuations.
-- If information is missing, ask ONLY for the missing piece.
-- NEVER reset context unless the user clearly changes topic.
-- NEVER invent prices, availability, or products.
-- Website fallback is LAST resort only when data truly does not exist in the KB.
-- Never repeat the same question.
-- Never send generic help messages.
-- Max 2 sentences per reply.
+        resolved = _resolve_price(state.selected_product, state.selected_country, state.selected_pack)
+        if resolved["status"] == "missing_pack":
+            return _ask_for_missing(state, "pack")
+        if resolved["status"] == "unknown_pack":
+            facts = f"{state.selected_product} pack was not found in our KB. Please choose 2LB or 5LB."
+            return _grounded_reply(facts)
+        if resolved["status"] == "missing_country_price":
+            note = resolved.get("note")
+            if note:
+                facts = (
+                    f"I do not have a {state.selected_country} price for {state.selected_product} in the KB. "
+                    f"Please check www.sporter.com or www.ifit-eg.com for the latest exact price."
+                )
+            else:
+                facts = (
+                    f"I do not have this country price in the KB for {state.selected_product}. "
+                    "Share another country (UAE, KSA, or Egypt) and I will check."
+                )
+            _clear_pricing_state(state)
+            return _grounded_reply(facts)
 
-### TASK MISSION:
-{instruction}
-
-### KNOWLEDGE BASE:
-{ON_KNOWLEDGE_BASE}
-"""
-
-    try:
-        hist.append(types.Content(role="user", parts=[types.Part(text=message)]))
-        if len(hist) > 8: 
-            CONVERSATION_HISTORY[user_id] = hist[-8:]
-            hist = CONVERSATION_HISTORY[user_id]
-
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=hist,
-            config={
-                "system_instruction": system_instruction,
-                "temperature": 0.1,
-                "max_output_tokens": 400
-            }
+        pack_text = f" ({resolved['pack']})" if resolved.get("pack") else ""
+        facts = (
+            f"{state.selected_product}{pack_text} price in {state.selected_country} is {resolved['value']}. "
+            "If you want, I can also share prices for another country."
         )
-        
-        if response and response.text:
-            ai_text = response.text.strip()
-            logger.info(f"AI Response for {user_id}: {ai_text}")
-            hist.append(types.Content(role="model", parts=[types.Part(text=ai_text)]))
-            return ai_text
-            
-    except Exception as e:
-        logger.error(f"Gen Error: {e}")
-        
-    return "Please check our official website for the most updated information."
+        _clear_pricing_state(state)
+        return _grounded_reply(facts)
+
+    if intent == "authenticity":
+        return _handle_authenticity()
+    if intent == "dietary":
+        return _handle_dietary()
+    if intent == "discovery":
+        return _handle_discovery()
+
+    if intent == "greeting":
+        if state.pending_intent == "price":
+            if not state.selected_product:
+                return _grounded_reply(
+                    "Hi. To continue pricing, tell me the product name."
+                )
+            if _needs_pack(state.selected_product) and not state.selected_pack:
+                return _grounded_reply(
+                    f"Hi. To continue pricing for {state.selected_product}, tell me the pack size: 2LB or 5LB."
+                )
+            if not state.selected_country:
+                return _grounded_reply(
+                    "Hi. To continue pricing, tell me your country: UAE, KSA, or Egypt."
+                )
+        return _grounded_reply(
+            "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
+        )
+
+    return _handle_discovery()
