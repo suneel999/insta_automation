@@ -8,6 +8,9 @@ import re
 import json
 import logging
 import difflib
+import sqlite3
+import threading
+import time
 from typing import Dict, Optional
 from google import genai
 from dotenv import load_dotenv
@@ -21,6 +24,8 @@ logger = logging.getLogger(__name__)
 # --- MEMORY STORE ---
 USER_STATES = {}  # { user_id: ConversationState }
 CONVERSATION_HISTORY = {}  # { user_id: [str] }
+DB_LOCK = threading.Lock()
+STATE_DB_PATH = os.getenv("STATE_DB_PATH", os.path.join(os.path.dirname(__file__), "conversation_state.db"))
 
 COUNTRY_ALIASES = {
     "uae": "UAE",
@@ -99,6 +104,34 @@ class ConversationState:
         self.last_priced_country = None
         self.requested_both_packs = False
 
+    def to_dict(self) -> dict:
+        return {
+            "user_id": self.user_id,
+            "mode": self.mode,
+            "pending_intent": self.pending_intent,
+            "selected_category": self.selected_category,
+            "selected_product": self.selected_product,
+            "selected_pack": self.selected_pack,
+            "selected_country": self.selected_country,
+            "last_asked": self.last_asked,
+            "last_product_mentioned": self.last_product_mentioned,
+            "last_pack_mentioned": self.last_pack_mentioned,
+            "last_country_mentioned": self.last_country_mentioned,
+            "last_priced_product": self.last_priced_product,
+            "last_priced_pack": self.last_priced_pack,
+            "last_priced_country": self.last_priced_country,
+            "requested_both_packs": self.requested_both_packs,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict):
+        user_id = payload.get("user_id") or "default"
+        state = cls(user_id)
+        for key, value in payload.items():
+            if hasattr(state, key):
+                setattr(state, key, value)
+        return state
+
 
 # Configure Gemini Client (optional for phrasing)
 api_key = os.getenv("GEMINI_API_KEY", "")
@@ -112,6 +145,101 @@ MODEL_CANDIDATES = [
 MODEL_CANDIDATES = [m for m in MODEL_CANDIDATES if m]
 WORKING_MODEL = None
 AI_DISABLED = False
+
+
+def _ensure_state_db() -> None:
+    with DB_LOCK:
+        conn = sqlite3.connect(STATE_DB_PATH)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    user_id TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    history_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _load_user_context(user_id: str):
+    if user_id in USER_STATES and user_id in CONVERSATION_HISTORY:
+        return USER_STATES[user_id], CONVERSATION_HISTORY[user_id]
+
+    _ensure_state_db()
+    with DB_LOCK:
+        conn = sqlite3.connect(STATE_DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT state_json, history_json FROM conversations WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+    if not row:
+        state = ConversationState(user_id)
+        history = []
+    else:
+        state = ConversationState.from_dict(json.loads(row[0]))
+        history = json.loads(row[1])
+        if not isinstance(history, list):
+            history = []
+
+    USER_STATES[user_id] = state
+    CONVERSATION_HISTORY[user_id] = history
+    return state, history
+
+
+def _save_user_context(user_id: str, state: ConversationState, history: list) -> None:
+    USER_STATES[user_id] = state
+    CONVERSATION_HISTORY[user_id] = history[-10:]
+
+    _ensure_state_db()
+    with DB_LOCK:
+        conn = sqlite3.connect(STATE_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO conversations (user_id, state_json, history_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                  state_json = excluded.state_json,
+                  history_json = excluded.history_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    json.dumps(state.to_dict(), ensure_ascii=True),
+                    json.dumps(history[-10:], ensure_ascii=True),
+                    int(time.time()),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _safety_guard_response(message: str, state: ConversationState, entities: dict, response_text: str) -> str:
+    if state.pending_intent != "price":
+        return response_text
+
+    text = response_text.lower()
+    looks_like_discovery = "main categories" in text or "which category do you want" in text
+    if not looks_like_discovery:
+        return response_text
+
+    if not state.selected_product:
+        return _ask_for_missing(state, "product")
+    if _needs_pack(state.selected_product) and not state.selected_pack and not state.requested_both_packs:
+        return _ask_for_missing(state, "pack")
+    if not state.selected_country:
+        return _ask_for_missing(state, "country")
+    return response_text
 
 
 def _normalize(text: str) -> str:
@@ -776,15 +904,17 @@ def _clear_pricing_state(state: ConversationState) -> None:
 
 
 def get_on_ai_response(message: str, user_id: str = "default") -> str:
-    if user_id not in USER_STATES:
-        USER_STATES[user_id] = ConversationState(user_id)
-        CONVERSATION_HISTORY[user_id] = []
+    state, history = _load_user_context(user_id)
 
-    state = USER_STATES[user_id]
-    history = CONVERSATION_HISTORY[user_id]
+    def finish(text: str) -> str:
+        safe = _safety_guard_response(message, state, entities, text)
+        _save_user_context(user_id, state, history)
+        return safe
+
     history.append(message)
     if len(history) > 10:
-        CONVERSATION_HISTORY[user_id] = history[-10:]
+        history = history[-10:]
+        CONVERSATION_HISTORY[user_id] = history
 
     entities = extract_entities(message, state)
     logger.info(f"User {user_id} | State: {state.mode} | Slots: {entities}")
@@ -865,11 +995,11 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             state.selected_country = state.last_priced_country
 
         if not state.selected_product:
-            return _ask_for_missing(state, "product")
+            return finish(_ask_for_missing(state, "product"))
 
         if state.requested_both_packs and _needs_pack(state.selected_product):
             if not state.selected_country:
-                return _ask_for_missing(state, "country")
+                return finish(_ask_for_missing(state, "country"))
             product_data = PRICING_DATA.get(state.selected_product, {})
             packs = product_data.get("packs", {})
             p2 = packs.get("2LB", {}).get(state.selected_country)
@@ -884,20 +1014,20 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                 state.last_priced_pack = None
                 state.last_priced_country = state.selected_country
                 _clear_pricing_state(state)
-                return _grounded_reply(facts)
+                return finish(_grounded_reply(facts))
 
         if _needs_pack(state.selected_product) and not state.selected_pack:
-            return _ask_for_missing(state, "pack")
+            return finish(_ask_for_missing(state, "pack"))
 
         if not state.selected_country:
-            return _ask_for_missing(state, "country")
+            return finish(_ask_for_missing(state, "country"))
 
         resolved = _resolve_price(state.selected_product, state.selected_country, state.selected_pack)
         if resolved["status"] == "missing_pack":
-            return _ask_for_missing(state, "pack")
+            return finish(_ask_for_missing(state, "pack"))
         if resolved["status"] == "unknown_pack":
             facts = f"{state.selected_product} pack was not found in our KB. Please choose 2LB or 5LB."
-            return _grounded_reply(facts)
+            return finish(_grounded_reply(facts))
         if resolved["status"] == "missing_country_price":
             note = resolved.get("note")
             if note:
@@ -911,7 +1041,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                     "Share another country (UAE, KSA, or Egypt) and I will check."
                 )
             _clear_pricing_state(state)
-            return _grounded_reply(facts)
+            return finish(_grounded_reply(facts))
 
         pack_text = f" ({resolved['pack']})" if resolved.get("pack") else ""
         facts = (
@@ -922,36 +1052,36 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         state.last_priced_pack = resolved.get("pack")
         state.last_priced_country = state.selected_country
         _clear_pricing_state(state)
-        return _grounded_reply(facts)
+        return finish(_grounded_reply(facts))
 
     if intent == "authenticity":
-        return _handle_authenticity()
+        return finish(_handle_authenticity())
     if intent == "dietary":
         msg_norm = _normalize(message)
         if ("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm:
-            return _handle_whey_vs_isolate()
-        return _handle_dietary()
+            return finish(_handle_whey_vs_isolate())
+        return finish(_handle_dietary())
     if intent == "where_to_buy":
-        return _handle_where_to_buy()
+        return finish(_handle_where_to_buy())
     if intent == "discovery":
-        return _handle_discovery(state)
+        return finish(_handle_discovery(state))
 
     if intent == "greeting":
         if state.pending_intent == "price":
             if not state.selected_product:
-                return _grounded_reply(
+                return finish(_grounded_reply(
                     "Hi. To continue pricing, tell me the product name."
-                )
+                ))
             if _needs_pack(state.selected_product) and not state.selected_pack:
-                return _grounded_reply(
+                return finish(_grounded_reply(
                     f"Hi. To continue pricing for {state.selected_product}, tell me the pack size: 2LB or 5LB."
-                )
+                ))
             if not state.selected_country:
-                return _grounded_reply(
+                return finish(_grounded_reply(
                     "Hi. To continue pricing, tell me your country: UAE, KSA, or Egypt."
-                )
-        return _grounded_reply(
+                ))
+        return finish(_grounded_reply(
             "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
-        )
+        ))
 
-    return _handle_discovery(state)
+    return finish(_handle_discovery(state))
