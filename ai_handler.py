@@ -470,6 +470,7 @@ AUTH_KEYWORDS = ["original", "authentic", "sticker", "fake", "genuine"]
 DIETARY_KEYWORDS = ["gluten", "vegan", "diet", "nutritionist", "isolate vs whey", "whey vs isolate"]
 WHERE_BUY_KEYWORDS = ["where buy", "where to buy", "where can i find", "find your products", "available at", "where available"]
 SMALLTALK_KEYWORDS = ["thanks", "thank you", "ok", "okay", "great", "awesome", "cool", "good morning", "good evening"]
+RESPONSE_STYLE = os.getenv("RESPONSE_STYLE", "friendly_concise")
 
 
 def _detect_pack(message: str) -> Optional[str]:
@@ -870,12 +871,17 @@ def extract_entities(message: str, state: ConversationState) -> dict:
 def _grounded_reply(facts: str, style_instruction: str = "") -> str:
     if not client:
         return facts
+    style_hint = (
+        "Friendly, concise tone. Sound human and direct."
+        if RESPONSE_STYLE == "friendly_concise"
+        else "Answer naturally and clearly."
+    )
     system = (
         "You are Optimum Nutrition Instagram DM assistant. "
         "Use ONLY provided facts. Do not add any new data. "
-        "Max 2 sentences. Ask only one missing detail when needed."
+        "Max 2 short sentences. Ask only one missing detail when needed."
     )
-    prompt = f"Facts:\n{facts}\n\nTask:\n{style_instruction or 'Answer naturally and clearly.'}"
+    prompt = f"Facts:\n{facts}\n\nTask:\n{style_instruction or style_hint}"
     try:
         response = _generate_with_fallback(
             prompt,
