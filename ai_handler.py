@@ -532,7 +532,23 @@ def _is_greeting(msg: str) -> bool:
     words = set(msg.split())
     if words.intersection({"hi", "hello", "hey", "hii", "heyy", "heyyy", "morning", "afternoon", "evening"}):
         return True
+    if any(re.fullmatch(r"h+i+", w) for w in words):
+        return True
     return False
+
+
+def _is_broad_listing_request(message: str) -> bool:
+    msg = _normalize(message)
+    broad_patterns = [
+        "what products",
+        "list all products",
+        "list products",
+        "all products",
+        "all your products",
+        "show all products",
+        "products you have",
+    ]
+    return any(p in msg for p in broad_patterns)
 
 
 def _category_product_pool(state: Optional[ConversationState]) -> list:
@@ -1056,7 +1072,9 @@ def _handle_where_to_buy() -> str:
 
 def _handle_smalltalk(message: str, state: ConversationState) -> str:
     msg = _normalize(message)
-    if any(g in msg.split() for g in ["hi", "hello", "hey", "hii", "heyy", "heyyy"]):
+    if any(g in msg.split() for g in ["hi", "hello", "hey", "hii", "heyy", "heyyy"]) or any(
+        re.fullmatch(r"h+i+", w) for w in msg.split()
+    ):
         fallback = "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
     elif "good morning" in msg or "morning" in msg:
         fallback = "Good morning. Tell me the product or price you want and I will help right away."
@@ -1122,6 +1140,8 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         state.selected_category = entities["category"]
 
     intent = entities.get("intent")
+    if intent == "discovery" and _is_broad_listing_request(message):
+        state.selected_category = None
 
     # Guardrail: during an active pricing flow, short slot-only replies must stay in price intent
     # even if AI-first intent classification drifts.
