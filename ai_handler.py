@@ -32,6 +32,47 @@ COUNTRY_ALIASES = {
     "eg": "Egypt",
 }
 
+CATEGORY_PRODUCTS = {
+    "protein": [
+        "Gold Standard 100% Whey",
+        "Serious Mass (Gainer)",
+        "Gold Standard 100% Isolate",
+        "Platinum HydroWhey",
+    ],
+    "energy": [
+        "Essential Amin.O. Energy",
+    ],
+    "pre-workout": [
+        "Gold Standard Pre-Workout",
+    ],
+    "recovery": [
+        "Gold Standard 100% Casein",
+        "Glutamine Powder",
+        "BCAA 5000",
+    ],
+    "vitamins": [
+        "Opti-Men",
+        "Opti-Women",
+        "Fish Oil Softgels",
+        "Micronized Creatine Powder",
+    ],
+}
+
+CATEGORY_ALIASES = {
+    "protein": "protein",
+    "proteins": "protein",
+    "whey": "protein",
+    "energy": "energy",
+    "amino": "energy",
+    "aminos": "energy",
+    "pre workout": "pre-workout",
+    "pre-workout": "pre-workout",
+    "recovery": "recovery",
+    "vitamin": "vitamins",
+    "vitamins": "vitamins",
+    "health": "vitamins",
+}
+
 
 class ConversationState:
     def __init__(self, user_id: str):
@@ -43,6 +84,12 @@ class ConversationState:
         self.selected_pack = None
         self.selected_country = None
         self.last_asked = None
+        self.last_product_mentioned = None
+        self.last_pack_mentioned = None
+        self.last_country_mentioned = None
+        self.last_priced_product = None
+        self.last_priced_pack = None
+        self.last_priced_country = None
 
 
 # Configure Gemini Client (optional for phrasing)
@@ -206,7 +253,15 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "dietary"
     if any(k in msg for k in ["price", "cost", "how much"]):
         return "price"
+    if re.search(r"\band\b", msg) and any(k in msg for k in ["uae", "ksa", "egypt", "2lb", "5lb"]):
+        return "price"
+    if any(k in msg for k in ["what about", "how about"]) and (
+        _detect_product(message) or _detect_country(message) or _detect_pack(message)
+    ):
+        return "price"
     if msg in {"this", "that", "this one", "that one"} and state.pending_intent == "price":
+        return "price"
+    if msg in {"this", "that", "this one", "that one"} and state.last_priced_product:
         return "price"
     if any(k in msg for k in ["browse", "products", "show products", "what do you have", "category"]):
         return "discovery"
@@ -215,6 +270,14 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     if is_short and state.pending_intent == "price":
         # Continue active pricing flow for short replies like "hydro", "uae", "2lb".
         return "price"
+    return None
+
+
+def _detect_category(message: str) -> Optional[str]:
+    msg = _normalize(message)
+    for alias, category in sorted(CATEGORY_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
+        if re.search(rf"\b{re.escape(alias)}\b", msg):
+            return category
     return None
 
 
@@ -245,9 +308,15 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         "product": _detect_product(message),
         "country": _detect_country(message),
         "pack": _detect_pack(message),
+        "category": _detect_category(message),
     }
 
     if any(entities.values()):
+        if entities.get("intent") == "price" and not entities.get("product"):
+            msg = _normalize(message)
+            if msg in {"this", "that", "this one", "that one"}:
+                entities["product"] = state.selected_product or state.last_priced_product or state.last_product_mentioned
+                entities["pack"] = entities.get("pack") or state.selected_pack or state.last_priced_pack or state.last_pack_mentioned
         return entities
 
     ai_entities = _fallback_ai_extract(message, state)
@@ -260,6 +329,7 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         "product": ai_entities.get("product"),
         "country": ai_entities.get("country"),
         "pack": ai_entities.get("pack"),
+        "category": _detect_category(message),
     }
 
 
@@ -319,6 +389,15 @@ def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
     state.last_asked = missing_field
 
     if missing_field == "product":
+        if state.selected_category in CATEGORY_PRODUCTS:
+            items = ", ".join(CATEGORY_PRODUCTS[state.selected_category])
+            facts = (
+                f"Please pick one product from {state.selected_category}: {items}. "
+                "Send the product name and I will continue pricing."
+            )
+            state.last_asked = "product_from_category"
+            return _grounded_reply(facts)
+
         facts = (
             "I need the product name to continue. "
             "You can send one: Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey."
@@ -371,11 +450,24 @@ def _resolve_price(product: str, country: str, pack: Optional[str]) -> dict:
     return {"status": "ok", "value": prices[country], "pack": None, "note": note}
 
 
-def _handle_discovery() -> str:
+def _handle_discovery(state: ConversationState) -> str:
+    category = state.selected_category
+    if category in CATEGORY_PRODUCTS:
+        items = ", ".join(CATEGORY_PRODUCTS[category])
+        facts = (
+            f"Our {category} products are: {items}. "
+            "Tell me one product name if you want details or price."
+        )
+        state.last_asked = f"discovery_{category}"
+        return _grounded_reply(facts)
+
     facts = (
         "Our main categories are Protein, Energy & Aminos, Pre-Workout, Recovery, and Vitamins/Health. "
-        "Tell me the category or product and I can continue with details or price."
+        "Which category do you want to see products for?"
     )
+    if state.last_asked == "discovery_generic":
+        facts = "Please choose one category: Protein, Energy & Aminos, Pre-Workout, Recovery, or Vitamins/Health."
+    state.last_asked = "discovery_generic"
     return _grounded_reply(facts)
 
 
@@ -424,11 +516,17 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
 
     if entities.get("product"):
         state.selected_product = entities["product"]
-        state.selected_pack = None
+        state.last_product_mentioned = entities["product"]
+        if entities["product"] != state.last_priced_product:
+            state.selected_pack = None
     if entities.get("pack"):
         state.selected_pack = entities["pack"]
+        state.last_pack_mentioned = entities["pack"]
     if entities.get("country"):
         state.selected_country = entities["country"]
+        state.last_country_mentioned = entities["country"]
+    if entities.get("category"):
+        state.selected_category = entities["category"]
 
     intent = entities.get("intent")
 
@@ -438,6 +536,11 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if intent == "price" or state.pending_intent == "price":
         state.mode = "transaction"
         state.pending_intent = "price"
+
+        if not state.selected_product and state.last_priced_product:
+            state.selected_product = state.last_priced_product
+        if not state.selected_pack and state.selected_product == state.last_priced_product and state.last_priced_pack:
+            state.selected_pack = state.last_priced_pack
 
         if not state.selected_product:
             return _ask_for_missing(state, "product")
@@ -474,6 +577,9 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             f"{state.selected_product}{pack_text} price in {state.selected_country} is {resolved['value']}. "
             "If you want, I can also share prices for another country."
         )
+        state.last_priced_product = state.selected_product
+        state.last_priced_pack = resolved.get("pack")
+        state.last_priced_country = state.selected_country
         _clear_pricing_state(state)
         return _grounded_reply(facts)
 
@@ -482,7 +588,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if intent == "dietary":
         return _handle_dietary()
     if intent == "discovery":
-        return _handle_discovery()
+        return _handle_discovery(state)
 
     if intent == "greeting":
         if state.pending_intent == "price":
@@ -502,4 +608,4 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
         )
 
-    return _handle_discovery()
+    return _handle_discovery(state)
