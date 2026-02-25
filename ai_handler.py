@@ -1,6 +1,6 @@
 """
-Instagram AI Handler for Optimum Nutrition (ON) - TWO-MODE PRODUCTION ARCHITECTURE
-Separates Discovery (Product Browsing) from Transaction (Statedful Pricing).
+Instagram AI Handler for Optimum Nutrition (ON) - ROBUST RECOVERY VERSION
+Fixed: Switched to stable models, added deeper error logging, and refined mode extraction.
 """
 
 import os
@@ -29,43 +29,44 @@ class ConversationState:
         self.selected_category = None
         self.selected_product = None
         self.selected_country = None
-        self.last_asked_slot = None
 
 # Configure Gemini Client
 api_key = os.getenv('GEMINI_API_KEY', '')
 client = None
 if api_key:
     client = genai.Client(api_key=api_key)
+else:
+    logger.error("CRITICAL: GEMINI_API_KEY not found in environment!")
 
 def extract_entities(message: str) -> dict:
     """
-    Step 1: Extract intent and slots from the user message.
+    Step 1: Extract intent and slots using the most STABLE model.
     """
-    prompt = f"""Analyze this message for an Optimum Nutrition support bot.
-Extract the following fields into JSON:
-- intent: ("price", "discovery", "authenticity", "greeting", or null)
-- product: (Full name from KB if mentioned, or null)
-- category: ("protein", "gainer", "energy", "pre_workout", "vitamins", or null)
-- country: ("UAE", "KSA", "Egypt", or null)
+    if not client:
+        return {}
+
+    prompt = f"""Extract intent and products from this message into JSON format.
+Fields: intent (price/discovery/authenticity/greeting), product (name), country (UAE/KSA/Egypt).
 
 Rules:
-1. Intent is "price" if user asks "cost", "how much", "price", or mentions a currency.
-2. Intent is "discovery" if user asks "what products", "tell me about", "what categories", or mentions a product without asking for price.
-3. Map "Dubai/Abu Dhabi" to "UAE", "Saudi/Riyadh" to "KSA".
+- intent is "price" if asking for cost/how much.
+- intent is "discovery" if browsing/asking about products.
+- intent is "greeting" if saying hi/hello.
 
 Message: "{message}"
 JSON:"""
 
     try:
+        # Using 1.5-flash for maximum reliability in JSON mode
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-1.5-flash', 
             contents=prompt,
             config={"temperature": 0.0, "response_mime_type": "application/json"}
         )
         if response and response.text:
             return json.loads(response.text)
     except Exception as e:
-        logger.error(f"Extraction Error: {e}")
+        logger.error(f"Extraction Error (Model might be down/quota): {e}")
     return {}
 
 def get_on_ai_response(message: str, user_id: str = "default") -> str:
@@ -82,72 +83,52 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
 
     # 2. Extract Entities
     entities = extract_entities(message)
-    logger.info(f"System State for {user_id}: Mode={state.mode} | Extracted={entities}")
+    logger.info(f"User {user_id} State: {state.mode} | Input Intent: {entities.get('intent')}")
 
-    # 3. Logic: Mode Switching & Slot Filling
-    # Switch to Transaction Mode if price is mentioned
+    # 3. Logic: Mode Switching
     if entities.get('intent') == "price":
         state.mode = "transaction"
-        state.pending_intent = "price"
     
-    # Update slots (Slots persist in both modes)
     if entities.get('product'): state.selected_product = entities['product']
-    if entities.get('category'): state.selected_category = entities['category']
     if entities.get('country'): state.selected_country = entities['country']
 
-    # 4. Mode-Based Instruction Generation
+    # 4. Mode-Based Instruction
     instruction = ""
-    
-    # MODE A: TRANSACTION (Price Logic)
     if state.mode == "transaction":
         if not state.selected_product:
-            instruction = "We are in PRICING mode. No product identified yet. Ask: 'Which specific product would you like the price for?' List 3 popular options (Whey, Serious Mass, Amin.O. Energy)."
-            state.last_asked_slot = "product"
+            instruction = "Price mode: We need a product. Ask: 'Which product would you like to know the price of?'"
         elif not state.selected_country:
-            instruction = f"We have the product: {state.selected_product}. We need the location. Ask: 'To give you the correct price for {state.selected_product}, which country are you in: UAE, KSA, or Egypt?'"
-            state.last_asked_slot = "country"
+            instruction = f"Price mode for {state.selected_product}: We need the location. Ask: 'Which country are you in (UAE, KSA, or Egypt) to provide the correct price?'"
         else:
-            instruction = f"PRICING FULFILLMENT: Provide the exact price for {state.selected_product} in {state.selected_country} from the KB. After answering, clear the price intent."
-            # Clear transactional state after this response
-            state.mode = "discovery"
-            state.pending_intent = None
-            state.selected_product = None
-            state.selected_country = None
-
-    # MODE B: DISCOVERY (Browsing/Greeting)
+            instruction = f"Provide the exact price for {state.selected_product} in {state.selected_country} from the KB. End the price intent after this."
+            state.mode = "discovery" # Reset after answering
     else:
+        # Discovery / Greeting
         if entities.get('intent') == "greeting":
-            instruction = "Greeting: Use the WELCOME section. Ask how you can help."
-        elif entities.get('intent') == "authenticity":
-            instruction = "Authenticity: Explain the sticker and 6-digit code policy clearly."
+            instruction = "Greeting: Use the WELCOME section. Ask how you can help today."
         else:
-            # General Browsing (RAG-like)
-            instruction = "DISCOVERY MODE: The user is browsing. Briefly describe our main categories (Protein, Energy, Vitamins). If they mentioned a category, list the products in it. Do NOT ask for country or price info here."
+            instruction = "Discovery: Use the PRODUCT OVERVIEW to list categories and ask which one they need details for."
 
-    # 5. Final Generator Prompt
-    system_instruction = f"""You are the official Optimum Nutrition support assistant.
+    # 5. Final Generator
+    system_instruction = f"""You are the official Optimum Nutrition support.
 TASK MISSION: {instruction}
 
-STRICT OPERATIONAL RULES:
-- If in DISCOVERY mode, be descriptive and helpful. Do not mention prices.
-- If in TRANSACTION mode, be precise and data-driven.
-- ALWAYS complete your sentences. Ending with a period or question mark is mandatory.
-- Use ONLY the Knowledge Base below.
-- Max 2 sentences total.
+RULES:
+- Use ONLY the KB below.
+- Do NOT repeat greetings.
+- Max 2 sentences.
+- Always finish your sentence.
 
-=== KNOWLEDGE BASE ===
+KNOWLEDGE BASE:
 {ON_KNOWLEDGE_BASE}
 """
 
     try:
-        # History window management
         hist.append(types.Content(role="user", parts=[types.Part(text=message)]))
-        if len(hist) > 6: 
-            CONVERSATION_HISTORY[user_id] = hist[-6:]
-            hist = CONVERSATION_HISTORY[user_id]
+        if len(hist) > 6: hist = hist[-6:]
 
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-1.5-flash',
             contents=hist,
             config={
                 "system_instruction": system_instruction,
@@ -158,15 +139,11 @@ STRICT OPERATIONAL RULES:
         
         if response and response.text:
             ai_text = response.text.strip()
-            # Safety check for truncation
-            if not ai_text.endswith(('.', '?', '!')):
-                logger.warning(f"Response might be truncated: {ai_text}")
-            
-            logger.info(f"AI Final Output for {user_id}: {ai_text}")
+            logger.info(f"AI for {user_id}: {ai_text}")
             hist.append(types.Content(role="model", parts=[types.Part(text=ai_text)]))
             return ai_text
             
     except Exception as e:
-        logger.error(f"Generation error: {e}")
+        logger.error(f"Generation Error (Model/Quota): {e}")
         
     return "Please check our official website for the most updated information."
