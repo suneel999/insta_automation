@@ -26,6 +26,7 @@ USER_STATES = {}  # { user_id: ConversationState }
 CONVERSATION_HISTORY = {}  # { user_id: [str] }
 DB_LOCK = threading.Lock()
 STATE_DB_PATH = os.getenv("STATE_DB_PATH", os.path.join(os.path.dirname(__file__), "conversation_state.db"))
+STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "43200"))
 
 COUNTRY_ALIASES = {
     "uae": "UAE",
@@ -175,7 +176,7 @@ def _load_user_context(user_id: str):
         conn = sqlite3.connect(STATE_DB_PATH)
         try:
             row = conn.execute(
-                "SELECT state_json, history_json FROM conversations WHERE user_id = ?",
+                "SELECT state_json, history_json, updated_at FROM conversations WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
         finally:
@@ -185,10 +186,16 @@ def _load_user_context(user_id: str):
         state = ConversationState(user_id)
         history = []
     else:
-        state = ConversationState.from_dict(json.loads(row[0]))
-        history = json.loads(row[1])
-        if not isinstance(history, list):
+        updated_at = int(row[2] or 0)
+        is_stale = STATE_TTL_SECONDS > 0 and (int(time.time()) - updated_at) > STATE_TTL_SECONDS
+        if is_stale:
+            state = ConversationState(user_id)
             history = []
+        else:
+            state = ConversationState.from_dict(json.loads(row[0]))
+            history = json.loads(row[1])
+            if not isinstance(history, list):
+                history = []
 
     USER_STATES[user_id] = state
     CONVERSATION_HISTORY[user_id] = history
@@ -595,7 +602,7 @@ def _detect_category(message: str) -> Optional[str]:
     for token in msg.split():
         if len(token) < 4:
             continue
-        match = difflib.get_close_matches(token, alias_keys, n=1, cutoff=0.76)
+        match = difflib.get_close_matches(token, alias_keys, n=1, cutoff=0.82)
         if match:
             return CATEGORY_ALIASES[match[0]]
     return None
@@ -958,10 +965,20 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             or (state.last_asked == "pack" and (entities.get("pack") or entities.get("both_packs")))
             or (state.last_asked == "product" and entities.get("product"))
         )
+        continuity_hint = (
+            state.last_asked in {"pack", "country", "product"}
+            and (
+                entities.get("both_packs")
+                or entities.get("country")
+                or entities.get("pack")
+                or msg_norm in {"both", "both prices", "both packs", "price both"}
+            )
+        )
         if (
             not explicit_non_price
             and (
             expected_slot_filled
+            or continuity_hint
             or
             (
             entities.get("country")
@@ -984,6 +1001,8 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
 
         if not state.selected_product and state.last_priced_product:
             state.selected_product = state.last_priced_product
+        if not state.selected_product and state.last_product_mentioned:
+            state.selected_product = state.last_product_mentioned
         if not state.selected_pack and state.selected_product == state.last_priced_product and state.last_priced_pack:
             state.selected_pack = state.last_priced_pack
         if (
@@ -991,6 +1010,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             and state.last_priced_country
             and state.selected_product == state.last_priced_product
             and (entities.get("pack") or entities.get("both_packs"))
+            and re.search(r"\band\b", _normalize(message))
         ):
             state.selected_country = state.last_priced_country
 

@@ -3,16 +3,21 @@ Lightweight regression suite for Instagram DM assistant.
 Runs multi-turn scenarios and validates expected keywords in replies.
 """
 
+import os
+
 from ai_handler import (
     get_on_ai_response,
     USER_STATES,
     CONVERSATION_HISTORY,
+    STATE_DB_PATH,
 )
 
 
 def reset_state():
     USER_STATES.clear()
     CONVERSATION_HISTORY.clear()
+    if os.path.exists(STATE_DB_PATH):
+        os.remove(STATE_DB_PATH)
 
 
 def run_scenario(scenario_id, turns):
