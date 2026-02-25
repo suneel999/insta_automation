@@ -209,6 +209,31 @@ PRODUCT_ALIASES = {
     "hydrowhey": "Platinum HydroWhey",
     "platinum hydro whey": "Platinum HydroWhey",
 }
+INTENT_NOISE_WORDS = {
+    "price",
+    "cost",
+    "how",
+    "much",
+    "show",
+    "products",
+    "product",
+    "category",
+    "categories",
+    "what",
+    "about",
+    "and",
+    "in",
+    "for",
+    "the",
+    "a",
+    "an",
+    "me",
+    "tell",
+    "please",
+    "need",
+    "want",
+    "know",
+}
 
 
 def _detect_pack(message: str) -> Optional[str]:
@@ -224,7 +249,22 @@ def _detect_country(message: str) -> Optional[str]:
     return None
 
 
-def _detect_product(message: str) -> Optional[str]:
+def _category_product_pool(state: Optional[ConversationState]) -> list:
+    if not state or not state.selected_category:
+        return PRODUCTS
+    return CATEGORY_PRODUCTS.get(state.selected_category, PRODUCTS)
+
+
+def _score_product_match(message: str, product: str) -> int:
+    msg_tokens = [t for t in _normalize(message).split() if t and t not in INTENT_NOISE_WORDS]
+    if not msg_tokens:
+        return 0
+    product_tokens = [t for t in _normalize(product).split() if t and t not in {"100"}]
+    score = len(set(msg_tokens).intersection(set(product_tokens)))
+    return score
+
+
+def _detect_product(message: str, state: Optional[ConversationState] = None) -> Optional[str]:
     msg = _normalize(message)
 
     if msg in PRODUCT_BY_NORMALIZED_NAME:
@@ -236,9 +276,33 @@ def _detect_product(message: str) -> Optional[str]:
         if re.search(rf"\b{re.escape(alias)}\b", msg):
             return product
 
+    # Default for common shorthand.
+    if "gold standard" in msg and not any(k in msg for k in ["isolate", "pre workout", "pre-workout", "casein"]):
+        if state and state.selected_category and state.selected_category != "protein":
+            return None
+        return "Gold Standard 100% Whey"
+
     for normalized, product in PRODUCT_BY_NORMALIZED_NAME.items():
         if re.search(rf"\b{re.escape(normalized)}\b", msg):
             return product
+
+    # Fuzzy token overlap for partial names like "gold standard cost".
+    pool = _category_product_pool(state)
+    scored = [(p, _score_product_match(message, p)) for p in pool]
+    scored = [item for item in scored if item[1] > 0]
+    if not scored:
+        return None
+
+    best_score = max(s for _, s in scored)
+    best = [p for p, s in scored if s == best_score]
+    if len(best) == 1:
+        return best[0]
+
+    # Tie-breaker by category order so replies stay deterministic.
+    if state and state.selected_category in CATEGORY_PRODUCTS:
+        for p in CATEGORY_PRODUCTS[state.selected_category]:
+            if p in best:
+                return p
     return None
 
 
@@ -256,7 +320,7 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     if re.search(r"\band\b", msg) and any(k in msg for k in ["uae", "ksa", "egypt", "2lb", "5lb"]):
         return "price"
     if any(k in msg for k in ["what about", "how about"]) and (
-        _detect_product(message) or _detect_country(message) or _detect_pack(message)
+        _detect_product(message, state) or _detect_country(message) or _detect_pack(message)
     ):
         return "price"
     if msg in {"this", "that", "this one", "that one"} and state.pending_intent == "price":
@@ -305,7 +369,7 @@ If unsure, return null values."""
 def extract_entities(message: str, state: ConversationState) -> dict:
     entities = {
         "intent": _detect_intent(message, state),
-        "product": _detect_product(message),
+        "product": _detect_product(message, state),
         "country": _detect_country(message),
         "pack": _detect_pack(message),
         "category": _detect_category(message),
@@ -326,7 +390,7 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         ai_entities["pack"] = _to_pack(str(ai_entities["pack"]))
     return {
         "intent": ai_entities.get("intent"),
-        "product": ai_entities.get("product"),
+        "product": _detect_product(str(ai_entities.get("product") or ""), state) or ai_entities.get("product"),
         "country": ai_entities.get("country"),
         "pack": ai_entities.get("pack"),
         "category": _detect_category(message),
