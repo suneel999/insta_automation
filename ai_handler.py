@@ -534,11 +534,24 @@ def _is_greeting(msg: str) -> bool:
         return True
     if any(re.fullmatch(r"h+i+", w) for w in words):
         return True
+    # Tolerate distorted greeting spellings like "helooo", "hyy", "helloooo".
+    for w in words:
+        if len(w) < 2:
+            continue
+        simplified = re.sub(r"(.)\1{2,}", r"\1\1", w)
+        if simplified.startswith("hel"):
+            return True
+        if difflib.get_close_matches(w, ["hi", "hey", "hello"], n=1, cutoff=0.65):
+            return True
+        if difflib.get_close_matches(simplified, ["hi", "hey", "hello"], n=1, cutoff=0.65):
+            return True
     return False
 
 
 def _is_broad_listing_request(message: str) -> bool:
     msg = _normalize(message)
+    if _detect_category(message):
+        return False
     broad_patterns = [
         "what products",
         "list all products",
@@ -548,7 +561,14 @@ def _is_broad_listing_request(message: str) -> bool:
         "show all products",
         "products you have",
     ]
-    return any(p in msg for p in broad_patterns)
+    if any(p in msg for p in broad_patterns):
+        return True
+
+    tokens = set(msg.split())
+    has_product = "product" in tokens or "products" in tokens
+    has_listing_verb = bool(tokens.intersection({"list", "show", "have", "give", "share"}))
+    has_broad_scope = bool(tokens.intersection({"all", "everything", "full"}))
+    return has_product and (has_listing_verb or has_broad_scope)
 
 
 def _category_product_pool(state: Optional[ConversationState]) -> list:
@@ -1072,14 +1092,12 @@ def _handle_where_to_buy() -> str:
 
 def _handle_smalltalk(message: str, state: ConversationState) -> str:
     msg = _normalize(message)
-    if any(g in msg.split() for g in ["hi", "hello", "hey", "hii", "heyy", "heyyy"]) or any(
-        re.fullmatch(r"h+i+", w) for w in msg.split()
-    ):
-        fallback = "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
-    elif "good morning" in msg or "morning" in msg:
+    if "good morning" in msg or "morning" in msg:
         fallback = "Good morning. Tell me the product or price you want and I will help right away."
     elif "good evening" in msg or "evening" in msg:
         fallback = "Good evening. Tell me the product or price you want and I will help right away."
+    elif _is_greeting(msg):
+        fallback = "Hello, welcome to Optimum Nutrition support. Tell me a product or ask for a price and I will help."
     elif "thank" in msg:
         fallback = "You are welcome. If you want, I can check another product price now."
     else:

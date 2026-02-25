@@ -166,6 +166,79 @@ SCENARIOS = [
         {"user": "gold standard", "expect_any": ["2lb", "5lb"]},
         {"user": "both prices egypt", "expect_any": ["2lb is 850 le", "5lb is 1750 le"]},
     ],
+    [
+        {"user": "hiiii", "expect_any": ["welcome", "hello"]},
+        {"user": "list all products", "expect_any": ["main categories"]},
+    ],
+    [
+        {"user": "heloooo", "expect_any": ["welcome", "hello"]},
+        {"user": "show all products", "expect_any": ["main categories"]},
+    ],
+    [
+        {"user": "give me all your products", "expect_any": ["main categories"]},
+        {"user": "protein", "expect_any": ["protein products"]},
+    ],
+    [
+        {"user": "what all products do u have", "expect_any": ["main categories"]},
+    ],
+    [
+        {"user": "gold standard in uae", "expect_any": ["2lb", "5lb"]},
+        {"user": "both prices", "expect_any": ["which country", "uae, ksa, or egypt", "2lb is aed 156.45"]},
+    ],
+    [
+        {"user": "price whey", "expect_any": ["2lb", "5lb"]},
+        {"user": "2lb", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "uae", "expect_any": ["aed 156.45"]},
+        {"user": "what about 5lb", "expect_any": ["aed 282.88"]},
+    ],
+    [
+        {"user": "price hydro", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "uae", "expect_any": ["aed 336"]},
+        {"user": "and ksa", "expect_any": ["sar 441.60"]},
+    ],
+    [
+        {"user": "where can i find your products", "expect_any": ["sporter.com", "ifit-eg.com"]},
+    ],
+    [
+        {"user": "where available in ksa", "expect_any": ["sporter.com", "dr. nutrition"]},
+    ],
+    [
+        {"user": "is this original", "expect_any": ["sticker", "originalon.com"]},
+        {"user": "no sticker", "expect_any": ["cannot be guaranteed", "sticker"]},
+    ],
+    [
+        {"user": "whey vs isolate", "expect_any": ["lower fat", "higher protein"]},
+    ],
+    [
+        {"user": "is whey fully gluten free", "expect_any": ["gluten-free", "cookies and cream"]},
+    ],
+    [
+        {"user": "thanks", "expect_any": ["welcome", "another product price", "sure"]},
+    ],
+    [
+        {"user": "good evening", "expect_any": ["good evening", "product or price"]},
+    ],
+    [
+        {"user": "show vitamins products", "expect_any": ["opti-men", "fish oil softgels"]},
+        {"user": "opti men price", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "ksa", "expect_any": ["sar 124.20"]},
+    ],
+    [
+        {"user": "price fish oil in dubai", "expect_any": ["aed 72.45"]},
+    ],
+    [
+        {"user": "price preworkout egypt", "expect_any": ["650 le"]},
+    ],
+    [
+        {"user": "price preworkout uae", "expect_any": ["check www.sporter.com", "do not have a uae price"]},
+    ],
+    [
+        {"user": "price creatine egypt", "expect_any": ["470 le"]},
+    ],
+    [
+        {"user": "price bcaa egypt", "expect_any": ["550 le"]},
+        {"user": "what about uae", "expect_any": ["aed 136.50"]},
+    ],
 ]
 
 
