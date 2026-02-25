@@ -97,6 +97,7 @@ class ConversationState:
         self.last_priced_product = None
         self.last_priced_pack = None
         self.last_priced_country = None
+        self.requested_both_packs = False
 
 
 # Configure Gemini Client (optional for phrasing)
@@ -262,6 +263,20 @@ def _detect_pack(message: str) -> Optional[str]:
     return _to_pack(m.group(1)) if m else None
 
 
+def _wants_both_packs(message: str) -> bool:
+    msg = _normalize(message)
+    if "both" in msg and any(k in msg for k in ["price", "prices", "pack", "lb", "size", "2", "5"]):
+        return True
+    if "2lb" in msg and "5lb" in msg:
+        return True
+    if "2 lb" in msg and "5 lb" in msg:
+        return True
+    # typo-friendly for "prices" / "process" style misspellings
+    if "both" in msg and difflib.get_close_matches("price", msg.split(), n=1, cutoff=0.6):
+        return True
+    return False
+
+
 def _detect_country(message: str) -> Optional[str]:
     msg = _normalize(message)
     for alias, canonical in COUNTRY_ALIASES.items():
@@ -379,6 +394,8 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "dietary"
     if _contains_fuzzy_keyword(msg, PRICE_KEYWORDS):
         return "price"
+    if _wants_both_packs(message) and (state.pending_intent == "price" or state.selected_product):
+        return "price"
     if re.search(r"\band\b", msg) and (_detect_country(message) or _detect_pack(message)):
         return "price"
     if any(k in msg for k in ["what about", "how about"]) and (
@@ -416,16 +433,29 @@ def _detect_category(message: str) -> Optional[str]:
     return None
 
 
-def _fallback_ai_extract(message: str, state: ConversationState) -> dict:
-    if not client:
+def _ai_extract_first(message: str, state: ConversationState) -> dict:
+    if not client or AI_DISABLED:
         return {}
-    prompt = f"""Extract JSON only with keys intent, product, country, pack.
+    prompt = f"""Extract JSON only. Keys: intent, product, country, pack, category, both_packs, confidence.
 message: "{message}"
-current_intent: "{state.pending_intent or ''}"
-Allowed intents: price, discovery, authenticity, greeting, dietary, null.
-country must be one of UAE,KSA,Egypt,null.
-pack must be format like 2LB,5LB or null.
-If unsure, return null values."""
+memory:
+- pending_intent: "{state.pending_intent or ''}"
+- selected_category: "{state.selected_category or ''}"
+- selected_product: "{state.selected_product or ''}"
+- selected_pack: "{state.selected_pack or ''}"
+- selected_country: "{state.selected_country or ''}"
+- last_priced_product: "{state.last_priced_product or ''}"
+- last_priced_pack: "{state.last_priced_pack or ''}"
+- last_priced_country: "{state.last_priced_country or ''}"
+
+Rules:
+- Allowed intents: price, discovery, authenticity, greeting, dietary, null.
+- country must be one of UAE,KSA,Egypt,null.
+- pack must be 2LB/5LB or null.
+- both_packs must be true/false.
+- confidence is 0.0 to 1.0.
+- Use memory for short follow-ups like "this", "that", "and in ksa", "both prices".
+- If unsure return null values and lower confidence."""
     try:
         response = _generate_with_fallback(
             prompt,
@@ -433,18 +463,78 @@ If unsure, return null values."""
         )
         return json.loads(response.text) if response and response.text else {}
     except Exception as e:
-        logger.error(f"AI extraction fallback failed: {e}")
+        logger.error(f"AI extraction failed: {e}")
         return {}
 
 
+def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
+    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", None}
+    intent = ai_entities.get("intent")
+    if intent not in allowed_intents:
+        intent = None
+
+    country = ai_entities.get("country")
+    if country not in {"UAE", "KSA", "Egypt"}:
+        country = None
+
+    pack = ai_entities.get("pack")
+    pack = _to_pack(str(pack)) if pack else None
+    if pack and pack not in {"2LB", "5LB"}:
+        pack = None
+
+    category = _detect_category(str(ai_entities.get("category") or ""))
+    product = _detect_product(str(ai_entities.get("product") or ""), state)
+    both_packs = bool(ai_entities.get("both_packs"))
+
+    try:
+        confidence = float(ai_entities.get("confidence", 0.0))
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    return {
+        "intent": intent,
+        "product": product,
+        "country": country,
+        "pack": pack,
+        "category": category,
+        "both_packs": both_packs,
+        "confidence": confidence,
+    }
+
+
 def extract_entities(message: str, state: ConversationState) -> dict:
-    entities = {
+    deterministic = {
         "intent": _detect_intent(message, state),
         "product": _detect_product(message, state),
         "country": _detect_country(message),
         "pack": _detect_pack(message),
         "category": _detect_category(message),
+        "both_packs": _wants_both_packs(message),
     }
+
+    ai_raw = _ai_extract_first(message, state)
+    ai = _validate_ai_entities(ai_raw, state) if ai_raw else {}
+    high_conf = ai.get("confidence", 0.0) >= 0.55
+
+    if high_conf:
+        entities = {
+            "intent": ai.get("intent") or deterministic["intent"],
+            "product": ai.get("product") or deterministic["product"],
+            "country": ai.get("country") or deterministic["country"],
+            "pack": ai.get("pack") or deterministic["pack"],
+            "category": ai.get("category") or deterministic["category"],
+            "both_packs": ai.get("both_packs") or deterministic["both_packs"],
+        }
+    else:
+        entities = {
+            "intent": deterministic["intent"] or ai.get("intent"),
+            "product": deterministic["product"] or ai.get("product"),
+            "country": deterministic["country"] or ai.get("country"),
+            "pack": deterministic["pack"] or ai.get("pack"),
+            "category": deterministic["category"] or ai.get("category"),
+            "both_packs": deterministic["both_packs"] or ai.get("both_packs"),
+        }
 
     if any(entities.values()):
         if entities.get("intent") == "price" and not entities.get("product"):
@@ -453,19 +543,7 @@ def extract_entities(message: str, state: ConversationState) -> dict:
                 entities["product"] = state.selected_product or state.last_priced_product or state.last_product_mentioned
                 entities["pack"] = entities.get("pack") or state.selected_pack or state.last_priced_pack or state.last_pack_mentioned
         return entities
-
-    ai_entities = _fallback_ai_extract(message, state)
-    if ai_entities.get("country") and ai_entities["country"] not in {"UAE", "KSA", "Egypt"}:
-        ai_entities["country"] = None
-    if ai_entities.get("pack"):
-        ai_entities["pack"] = _to_pack(str(ai_entities["pack"]))
-    return {
-        "intent": ai_entities.get("intent"),
-        "product": _detect_product(str(ai_entities.get("product") or ""), state) or ai_entities.get("product"),
-        "country": ai_entities.get("country"),
-        "pack": ai_entities.get("pack"),
-        "category": _detect_category(message),
-    }
+    return deterministic
 
 
 def _grounded_reply(facts: str, style_instruction: str = "") -> str:
@@ -632,6 +710,7 @@ def _clear_pricing_state(state: ConversationState) -> None:
     state.selected_pack = None
     state.selected_country = None
     state.last_asked = None
+    state.requested_both_packs = False
     state.mode = "discovery"
 
 
@@ -657,6 +736,10 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if entities.get("pack"):
         state.selected_pack = entities["pack"]
         state.last_pack_mentioned = entities["pack"]
+    if entities.get("both_packs"):
+        state.requested_both_packs = True
+        if state.selected_product and _needs_pack(state.selected_product):
+            state.selected_pack = "__BOTH__"
     if entities.get("country"):
         state.selected_country = entities["country"]
         state.last_country_mentioned = entities["country"]
@@ -679,6 +762,25 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
 
         if not state.selected_product:
             return _ask_for_missing(state, "product")
+
+        if state.requested_both_packs and _needs_pack(state.selected_product):
+            if not state.selected_country:
+                return _ask_for_missing(state, "country")
+            product_data = PRICING_DATA.get(state.selected_product, {})
+            packs = product_data.get("packs", {})
+            p2 = packs.get("2LB", {}).get(state.selected_country)
+            p5 = packs.get("5LB", {}).get(state.selected_country)
+            if p2 and p5:
+                facts = (
+                    f"{state.selected_product} prices in {state.selected_country}: "
+                    f"2LB is {p2} and 5LB is {p5}. "
+                    "If you want, I can also share another country."
+                )
+                state.last_priced_product = state.selected_product
+                state.last_priced_pack = None
+                state.last_priced_country = state.selected_country
+                _clear_pricing_state(state)
+                return _grounded_reply(facts)
 
         if _needs_pack(state.selected_product) and not state.selected_pack:
             return _ask_for_missing(state, "pack")
