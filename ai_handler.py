@@ -93,6 +93,11 @@ CATEGORY_ALIASES = {
     "vitamins": "vitamins",
     "health": "vitamins",
 }
+PRODUCT_TO_CATEGORY = {
+    product: category
+    for category, products in CATEGORY_PRODUCTS.items()
+    for product in products
+}
 
 
 class ConversationState:
@@ -589,6 +594,11 @@ def _is_affirmative(message: str) -> bool:
     return msg in affirm
 
 
+def _is_pronoun_reference(message: str) -> bool:
+    msg = _normalize(message)
+    return any(p in msg.split() for p in {"this", "that"}) or "this one" in msg or "that one" in msg
+
+
 def _category_product_pool(state: Optional[ConversationState]) -> list:
     if not state or not state.selected_category:
         return PRODUCTS
@@ -719,6 +729,8 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "price"
     if _contains_fuzzy_keyword(msg, WHERE_BUY_KEYWORDS):
         return "where_to_buy"
+    if category_guess and not _contains_fuzzy_keyword(msg, PRICE_KEYWORDS):
+        return "discovery"
     if _is_affirmative(message):
         return "confirm"
     if _contains_fuzzy_keyword(msg, SMALLTALK_KEYWORDS):
@@ -877,6 +889,14 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     # Guard intent priority: explicit price wording must remain price.
     if _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS) and entities.get("intent") != "price":
         entities["intent"] = "price"
+
+    # Pronoun follow-ups should map to the last referenced product.
+    if _is_pronoun_reference(message) and not entities.get("product"):
+        entities["product"] = (
+            state.selected_product
+            or state.last_priced_product
+            or state.last_product_mentioned
+        )
 
     if any(entities.values()):
         if entities.get("intent") == "price" and not entities.get("product"):
@@ -1131,6 +1151,16 @@ def _handle_smalltalk(message: str, state: ConversationState) -> str:
     return _ai_rag_reply(message, state, fallback)
 
 
+def _handle_product_info(product: str) -> str:
+    category = PRODUCT_TO_CATEGORY.get(product, "products")
+    pretty_category = "Vitamins/Health" if category == "vitamins" else category.title()
+    facts = (
+        f"{product} is in our {pretty_category} range. "
+        "If you want, I can share price for UAE, KSA, or Egypt."
+    )
+    return _grounded_reply(facts)
+
+
 def _handle_confirm(state: ConversationState) -> str:
     if state.last_priced_product:
         state.pending_intent = "price"
@@ -1196,7 +1226,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if entities.get("country"):
         state.selected_country = entities["country"]
         state.last_country_mentioned = entities["country"]
-    if entities.get("category"):
+    if entities.get("category") and not _is_pronoun_reference(message):
         state.selected_category = entities["category"]
 
     intent = entities.get("intent")
@@ -1368,6 +1398,12 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         return finish(_handle_smalltalk(message, state))
     if intent == "confirm":
         return finish(_handle_confirm(state))
+    if (
+        entities.get("product")
+        and intent not in {"price", "authenticity", "dietary", "where_to_buy"}
+        and not _contains_fuzzy_keyword(_normalize(message), PRICE_KEYWORDS)
+    ):
+        return finish(_handle_product_info(entities["product"]))
     if intent == "discovery":
         return finish(_handle_discovery(state))
 
