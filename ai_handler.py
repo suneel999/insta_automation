@@ -577,6 +577,15 @@ def _is_broad_listing_request(message: str) -> bool:
     return has_product and (has_listing_verb or has_broad_scope)
 
 
+def _is_category_listing_request(message: str) -> bool:
+    msg = _normalize(message)
+    has_list_verb = any(v in msg for v in ["list", "show", "tell me", "what", "which"])
+    has_category_word = "category" in msg or "categories" in msg
+    has_category_value = _detect_category(message) is not None
+    has_price_signal = _contains_fuzzy_keyword(msg, PRICE_KEYWORDS)
+    return has_category_value and (has_list_verb or has_category_word) and not has_price_signal
+
+
 def _is_affirmative(message: str) -> bool:
     msg = _normalize(message)
     affirm = {
@@ -889,6 +898,14 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     # Guard intent priority: explicit price wording must remain price.
     if _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS) and entities.get("intent") != "price":
         entities["intent"] = "price"
+
+    # Hard guard: category listing requests must stay in discovery flow.
+    if _is_category_listing_request(message):
+        entities["intent"] = "discovery"
+        entities["product"] = None
+        entities["country"] = None
+        entities["pack"] = None
+        entities["both_packs"] = False
 
     # Pronoun follow-ups should map to the last referenced product.
     if _is_pronoun_reference(message) and not entities.get("product"):
