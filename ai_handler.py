@@ -256,6 +256,7 @@ DISCOVERY_KEYWORDS = ["browse", "products", "show products", "what do you have",
 GREETING_KEYWORDS = ["hi", "hello", "hey"]
 AUTH_KEYWORDS = ["original", "authentic", "sticker", "fake", "genuine"]
 DIETARY_KEYWORDS = ["gluten", "vegan", "diet", "nutritionist", "isolate vs whey", "whey vs isolate"]
+WHERE_BUY_KEYWORDS = ["where buy", "where to buy", "where can i find", "find your products", "available at", "where available"]
 
 
 def _detect_pack(message: str) -> Optional[str]:
@@ -298,6 +299,26 @@ def _contains_fuzzy_keyword(msg: str, keywords: list, cutoff: float = 0.78) -> b
             continue
         if difflib.get_close_matches(token, single_word_keywords, n=1, cutoff=cutoff):
             return True
+    return False
+
+
+def _contains_dietary_marker(msg: str) -> bool:
+    if any(k in msg for k in ["gluten", "vegan", "nutritionist", "whey vs isolate", "isolate vs whey"]):
+        return True
+    tokens = msg.split()
+    markers = ["gluten", "vegan", "nutritionist"]
+    for token in tokens:
+        if len(token) < 4:
+            continue
+        if difflib.get_close_matches(token, markers, n=1, cutoff=0.72):
+            return True
+    return False
+
+
+def _is_greeting(msg: str) -> bool:
+    words = set(msg.split())
+    if words.intersection({"hi", "hello", "hey", "hii", "heyy", "heyyy"}):
+        return True
     return False
 
 
@@ -394,12 +415,21 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     country_guess = _detect_country(message)
     pack_guess = _detect_pack(message)
 
-    if _contains_fuzzy_keyword(msg, AUTH_KEYWORDS):
-        return "authenticity"
-    if _contains_fuzzy_keyword(msg, DIETARY_KEYWORDS):
+    # Strong dietary markers should win.
+    if ("difference" in msg or "vs" in msg) and "whey" in msg and "isolate" in msg:
         return "dietary"
+    if _contains_dietary_marker(msg):
+        return "dietary"
+
+    # Price signals first for transactional questions.
     if _contains_fuzzy_keyword(msg, PRICE_KEYWORDS):
         return "price"
+    if _contains_fuzzy_keyword(msg, WHERE_BUY_KEYWORDS):
+        return "where_to_buy"
+    if _contains_fuzzy_keyword(msg, AUTH_KEYWORDS):
+        return "authenticity"
+    if _contains_fuzzy_keyword(msg, DIETARY_KEYWORDS, cutoff=0.82):
+        return "dietary"
     if _wants_both_packs(message) and (state.pending_intent == "price" or state.selected_product):
         return "price"
     if product_guess and (country_guess or pack_guess):
@@ -416,7 +446,7 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "price"
     if _contains_fuzzy_keyword(msg, DISCOVERY_KEYWORDS):
         return "discovery"
-    if _contains_fuzzy_keyword(msg, GREETING_KEYWORDS) and (is_short or len(words) <= 6):
+    if _is_greeting(msg) and (is_short or len(words) <= 6):
         return "greeting"
     if is_short and state.pending_intent == "price":
         # Continue active pricing flow for short replies like "hydro", "uae", "2lb".
@@ -478,7 +508,7 @@ Rules:
 
 
 def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
-    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", None}
+    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", "where_to_buy", None}
     intent = ai_entities.get("intent")
     if intent not in allowed_intents:
         intent = None
@@ -514,6 +544,7 @@ def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
 
 
 def extract_entities(message: str, state: ConversationState) -> dict:
+    msg_norm = _normalize(message)
     deterministic = {
         "intent": _detect_intent(message, state),
         "product": _detect_product(message, state),
@@ -545,6 +576,10 @@ def extract_entities(message: str, state: ConversationState) -> dict:
             "category": deterministic["category"] or ai.get("category"),
             "both_packs": deterministic["both_packs"] or ai.get("both_packs"),
         }
+
+    # Guard intent priority: explicit price wording must remain price.
+    if _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS) and entities.get("intent") != "price":
+        entities["intent"] = "price"
 
     if any(entities.values()):
         if entities.get("intent") == "price" and not entities.get("product"):
@@ -710,8 +745,24 @@ def _handle_dietary() -> str:
     return _grounded_reply(facts)
 
 
+def _handle_whey_vs_isolate() -> str:
+    facts = (
+        "Gold Standard Isolate has lower fat and higher protein per serving than Gold Standard Whey. "
+        "Gold Standard Whey is certified gluten-free except Cookies and Cream flavor."
+    )
+    return _grounded_reply(facts)
+
+
+def _handle_where_to_buy() -> str:
+    facts = (
+        "UAE & KSA: available at www.sporter.com, www.amazon.ae, and Dr. Nutrition; also Life Pharmacies in UAE. "
+        "Egypt: available through iFIT at www.ifit-eg.com and at El Ezaby, Khalil, Max Muscle, and Bodybuilding House."
+    )
+    return _grounded_reply(facts)
+
+
 def _should_clear_pricing_context(intent: Optional[str]) -> bool:
-    return intent in {"authenticity", "dietary", "discovery"}
+    return intent in {"authenticity", "dietary", "discovery", "where_to_buy"}
 
 
 def _clear_pricing_state(state: ConversationState) -> None:
@@ -762,12 +813,26 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     # even if AI-first intent classification drifts.
     if state.pending_intent == "price":
         msg_norm = _normalize(message)
+        explicit_non_price = (
+            intent in {"dietary", "authenticity", "where_to_buy"}
+            or "gluten" in msg_norm
+            or "vegan" in msg_norm
+            or (("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm)
+            or "authentic" in msg_norm
+            or "original" in msg_norm
+            or "sticker" in msg_norm
+            or "where" in msg_norm and ("buy" in msg_norm or "find" in msg_norm)
+        )
         if (
+            not explicit_non_price
+            and intent not in {"discovery"}
+            and (
             entities.get("country")
             or entities.get("pack")
             or entities.get("product")
             or entities.get("both_packs")
             or msg_norm in {"this", "that", "this one", "that one"}
+            )
         ):
             intent = "price"
             entities["intent"] = "price"
@@ -854,7 +919,12 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if intent == "authenticity":
         return _handle_authenticity()
     if intent == "dietary":
+        msg_norm = _normalize(message)
+        if ("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm:
+            return _handle_whey_vs_isolate()
         return _handle_dietary()
+    if intent == "where_to_buy":
+        return _handle_where_to_buy()
     if intent == "discovery":
         return _handle_discovery(state)
 
