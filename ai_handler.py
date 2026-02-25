@@ -634,6 +634,16 @@ def _has_explicit_product_mention(message: str) -> bool:
     return False
 
 
+def _is_followup_phrase(message: str) -> bool:
+    msg = _normalize(message)
+    return (
+        "what about" in msg
+        or "how about" in msg
+        or re.search(r"\band\b", msg) is not None
+        or msg in {"again", "same"}
+    )
+
+
 def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     msg = _normalize(message)
     words = msg.split()
@@ -1175,14 +1185,19 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             state.selected_product = state.last_priced_product
         if not state.selected_product and state.last_product_mentioned:
             state.selected_product = state.last_product_mentioned
-        if not state.selected_pack and state.selected_product == state.last_priced_product and state.last_priced_pack:
+        if (
+            not state.selected_pack
+            and state.selected_product == state.last_priced_product
+            and state.last_priced_pack
+            and _is_followup_phrase(message)
+        ):
             state.selected_pack = state.last_priced_pack
         if (
             not state.selected_country
             and state.last_priced_country
             and state.selected_product == state.last_priced_product
             and (entities.get("pack") or entities.get("both_packs"))
-            and re.search(r"\band\b", _normalize(message))
+            and (_is_followup_phrase(message) or entities.get("pack"))
         ):
             state.selected_country = state.last_priced_country
 
