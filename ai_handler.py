@@ -7,6 +7,7 @@ import os
 import re
 import json
 import logging
+import difflib
 from typing import Dict, Optional
 from google import genai
 from dotenv import load_dotenv
@@ -24,11 +25,17 @@ CONVERSATION_HISTORY = {}  # { user_id: [str] }
 COUNTRY_ALIASES = {
     "uae": "UAE",
     "emirates": "UAE",
+    "emirats": "UAE",
     "dubai": "UAE",
     "ksa": "KSA",
     "saudi": "KSA",
+    "saoodi": "KSA",
+    "saudii": "KSA",
+    "sudia": "KSA",
     "saudi arabia": "KSA",
     "egypt": "Egypt",
+    "egyptt": "Egypt",
+    "egpyt": "Egypt",
     "eg": "Egypt",
 }
 
@@ -120,6 +127,15 @@ def _extract_country(segment: str) -> Optional[str]:
     for alias, canonical in COUNTRY_ALIASES.items():
         if alias in clean:
             return canonical
+
+    # Fuzzy country detection for typos.
+    alias_keys = list(COUNTRY_ALIASES.keys())
+    for token in clean.split():
+        if len(token) < 3:
+            continue
+        match = difflib.get_close_matches(token, alias_keys, n=1, cutoff=0.74)
+        if match:
+            return COUNTRY_ALIASES[match[0]]
     return None
 
 
@@ -234,6 +250,11 @@ INTENT_NOISE_WORDS = {
     "want",
     "know",
 }
+PRICE_KEYWORDS = ["price", "cost", "how much", "rate"]
+DISCOVERY_KEYWORDS = ["browse", "products", "show products", "what do you have", "category", "categories"]
+GREETING_KEYWORDS = ["hi", "hello", "hey"]
+AUTH_KEYWORDS = ["original", "authentic", "sticker", "fake", "genuine"]
+DIETARY_KEYWORDS = ["gluten", "vegan", "diet", "nutritionist", "isolate vs whey", "whey vs isolate"]
 
 
 def _detect_pack(message: str) -> Optional[str]:
@@ -246,7 +267,21 @@ def _detect_country(message: str) -> Optional[str]:
     for alias, canonical in COUNTRY_ALIASES.items():
         if re.search(rf"\b{re.escape(alias)}\b", msg):
             return canonical
-    return None
+    return _extract_country(message)
+
+
+def _contains_fuzzy_keyword(msg: str, keywords: list, cutoff: float = 0.78) -> bool:
+    for kw in keywords:
+        if kw in msg:
+            return True
+
+    single_word_keywords = [k for k in keywords if " " not in k]
+    for token in msg.split():
+        if len(token) < 3:
+            continue
+        if difflib.get_close_matches(token, single_word_keywords, n=1, cutoff=cutoff):
+            return True
+    return False
 
 
 def _category_product_pool(state: Optional[ConversationState]) -> list:
@@ -286,6 +321,33 @@ def _detect_product(message: str, state: Optional[ConversationState] = None) -> 
         if re.search(rf"\b{re.escape(normalized)}\b", msg):
             return product
 
+    # Fuzzy alias matching for typos like "hidro", "isolatee", "serios mass".
+    alias_keys = list(PRODUCT_ALIASES.keys()) + list(PRODUCT_BY_NORMALIZED_NAME.keys())
+    phrase_candidates = [msg]
+    tokens = msg.split()
+    for i in range(len(tokens)):
+        for j in range(i + 1, min(i + 5, len(tokens) + 1)):
+            phrase_candidates.append(" ".join(tokens[i:j]))
+
+    best_key = None
+    best_ratio = 0.0
+    for phrase in phrase_candidates:
+        if len(phrase) < 3:
+            continue
+        match = difflib.get_close_matches(phrase, alias_keys, n=1, cutoff=0.78)
+        if not match:
+            continue
+        ratio = difflib.SequenceMatcher(None, phrase, match[0]).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_key = match[0]
+
+    if best_key:
+        if best_key in PRODUCT_ALIASES:
+            return PRODUCT_ALIASES[best_key]
+        if best_key in PRODUCT_BY_NORMALIZED_NAME:
+            return PRODUCT_BY_NORMALIZED_NAME[best_key]
+
     # Fuzzy token overlap for partial names like "gold standard cost".
     pool = _category_product_pool(state)
     scored = [(p, _score_product_match(message, p)) for p in pool]
@@ -311,13 +373,13 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     words = msg.split()
     is_short = len(words) <= 3
 
-    if any(k in msg for k in ["original", "authentic", "sticker", "fake", "genuine"]):
+    if _contains_fuzzy_keyword(msg, AUTH_KEYWORDS):
         return "authenticity"
-    if any(k in msg for k in ["gluten", "vegan", "diet", "nutritionist", "isolate vs whey", "whey vs isolate"]):
+    if _contains_fuzzy_keyword(msg, DIETARY_KEYWORDS):
         return "dietary"
-    if any(k in msg for k in ["price", "cost", "how much"]):
+    if _contains_fuzzy_keyword(msg, PRICE_KEYWORDS):
         return "price"
-    if re.search(r"\band\b", msg) and any(k in msg for k in ["uae", "ksa", "egypt", "2lb", "5lb"]):
+    if re.search(r"\band\b", msg) and (_detect_country(message) or _detect_pack(message)):
         return "price"
     if any(k in msg for k in ["what about", "how about"]) and (
         _detect_product(message, state) or _detect_country(message) or _detect_pack(message)
@@ -327,9 +389,9 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "price"
     if msg in {"this", "that", "this one", "that one"} and state.last_priced_product:
         return "price"
-    if any(k in msg for k in ["browse", "products", "show products", "what do you have", "category"]):
+    if _contains_fuzzy_keyword(msg, DISCOVERY_KEYWORDS):
         return "discovery"
-    if any(k in msg for k in ["hi", "hello", "hey"]) and is_short:
+    if _contains_fuzzy_keyword(msg, GREETING_KEYWORDS) and is_short:
         return "greeting"
     if is_short and state.pending_intent == "price":
         # Continue active pricing flow for short replies like "hydro", "uae", "2lb".
@@ -342,6 +404,15 @@ def _detect_category(message: str) -> Optional[str]:
     for alias, category in sorted(CATEGORY_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
         if re.search(rf"\b{re.escape(alias)}\b", msg):
             return category
+
+    # Fuzzy category detection for typos like "protien", "vitmins".
+    alias_keys = list(CATEGORY_ALIASES.keys())
+    for token in msg.split():
+        if len(token) < 4:
+            continue
+        match = difflib.get_close_matches(token, alias_keys, n=1, cutoff=0.76)
+        if match:
+            return CATEGORY_ALIASES[match[0]]
     return None
 
 
