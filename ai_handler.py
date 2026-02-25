@@ -748,6 +748,20 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
 
     intent = entities.get("intent")
 
+    # Guardrail: during an active pricing flow, short slot-only replies must stay in price intent
+    # even if AI-first intent classification drifts.
+    if state.pending_intent == "price":
+        msg_norm = _normalize(message)
+        if (
+            entities.get("country")
+            or entities.get("pack")
+            or entities.get("product")
+            or entities.get("both_packs")
+            or msg_norm in {"this", "that", "this one", "that one"}
+        ):
+            intent = "price"
+            entities["intent"] = "price"
+
     if _should_clear_pricing_context(intent):
         _clear_pricing_state(state)
 
