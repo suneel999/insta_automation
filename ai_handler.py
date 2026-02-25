@@ -23,7 +23,34 @@ RESPONSE_CACHE = {}
 USER_STATES = {}  # { user_id: state_dict }
 CONVERSATION_HISTORY = {} # { user_id: [history] }
 
-# ... (Previous Mappings and Classes stay the same)
+# Mapping categories to products in the KB
+CATEGORY_MAP = {
+    "protein": ["Gold Standard 100% Whey", "Gold Standard Isolate", "Platinum HydroWhey"],
+    "gainer": ["Serious Mass"],
+    "energy": ["Essential Amin.O. Energy"],
+    "pre_workout": ["Gold Standard Pre-Workout"],
+    "recovery": ["Gold Standard 100% Casein", "Glutamine Powder", "BCAA 5000"],
+    "vitamins": ["Opti-Men", "Opti-Women", "Fish Oil Softgels", "Micronized Creatine Powder"]
+}
+
+# Configure Gemini Client
+api_key = os.getenv('GEMINI_API_KEY', '')
+client = None
+if api_key:
+    client = genai.Client(api_key=api_key)
+
+class ConversationState:
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.pending_intent = None
+        self.selected_category = None
+        self.selected_product = None
+        self.selected_pack = None
+        self.selected_country = None
+        self.last_question = None
+
+    def to_dict(self):
+        return vars(self)
 
 def extract_entities(message: str) -> dict:
     prompt = f"""Analyze this user message for an Optimum Nutrition support bot.
