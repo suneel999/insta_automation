@@ -1227,12 +1227,20 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     explicit_product_mention = _has_explicit_product_mention(message)
     if entities.get("product"):
         previous_product = state.selected_product
-        state.selected_product = entities["product"]
-        if explicit_product_mention:
-            state.last_product_mentioned = entities["product"]
-        # Do not reset pack unless user explicitly switched product in this message.
-        if explicit_product_mention and previous_product and entities["product"] != previous_product:
-            state.selected_pack = None
+        should_apply_product = (
+            explicit_product_mention
+            or not previous_product
+            or state.pending_intent == "price"
+            and previous_product is None
+        )
+        # Prevent AI-inferred product drift from replacing an explicit active product context.
+        if should_apply_product:
+            state.selected_product = entities["product"]
+            if explicit_product_mention:
+                state.last_product_mentioned = entities["product"]
+            # Do not reset pack unless user explicitly switched product in this message.
+            if explicit_product_mention and previous_product and entities["product"] != previous_product:
+                state.selected_pack = None
     if entities.get("pack"):
         state.selected_pack = entities["pack"]
         state.last_pack_mentioned = entities["pack"]
