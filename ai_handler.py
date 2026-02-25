@@ -823,15 +823,23 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             or "sticker" in msg_norm
             or "where" in msg_norm and ("buy" in msg_norm or "find" in msg_norm)
         )
+        expected_slot_filled = (
+            (state.last_asked == "country" and entities.get("country"))
+            or (state.last_asked == "pack" and (entities.get("pack") or entities.get("both_packs")))
+            or (state.last_asked == "product" and entities.get("product"))
+        )
         if (
             not explicit_non_price
-            and intent not in {"discovery"}
             and (
+            expected_slot_filled
+            or
+            (
             entities.get("country")
             or entities.get("pack")
             or entities.get("product")
             or entities.get("both_packs")
             or msg_norm in {"this", "that", "this one", "that one"}
+            )
             )
         ):
             intent = "price"
