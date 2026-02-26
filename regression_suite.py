@@ -102,7 +102,8 @@ SCENARIOS = [
         {"user": "ksa", "expect_any": ["2lb is sar 248.40", "5lb is sar 389.85"]},
     ],
     [
-        {"user": "how much creatine", "expect_any": ["470 le", "check the prices on www.sporter.com"]},
+        {"user": "how much creatine", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "ksa", "expect_any": ["do not have a ksa price", "check www.sporter.com"]},
     ],
     [
         {"user": "price bcaa", "expect_any": ["which country", "uae, ksa, or egypt"]},

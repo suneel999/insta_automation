@@ -647,15 +647,6 @@ def _is_pronoun_reference(message: str) -> bool:
     return any(p in msg.split() for p in {"this", "that"}) or "this one" in msg or "that one" in msg
 
 
-def _contains_any(msg: str, phrases: list) -> bool:
-    return any(p in msg for p in phrases)
-
-
-def _wants_full_price_answer(message: str) -> bool:
-    msg = _normalize(message)
-    return ("how much" in msg or "cost" in msg) and _detect_country(message) is None
-
-
 def _category_product_pool(state: Optional[ConversationState]) -> list:
     if not state or not state.selected_category:
         return PRODUCTS
@@ -1167,36 +1158,6 @@ def _resolve_price(product: str, country: str, pack: Optional[str]) -> dict:
     return {"status": "ok", "value": prices[country], "pack": None, "note": note}
 
 
-def _format_triplet(prices: dict) -> str:
-    parts = []
-    if prices.get("UAE"):
-        parts.append(prices["UAE"])
-    if prices.get("Egypt"):
-        parts.append(prices["Egypt"])
-    if prices.get("KSA"):
-        parts.append(prices["KSA"])
-    return " / ".join(parts)
-
-
-def _full_price_answer(product: str, pack: Optional[str] = None) -> str:
-    pdata = PRICING_DATA.get(product, {})
-    packs = pdata.get("packs", {})
-    prices = pdata.get("prices", {})
-    note = "We request you to check the prices on www.sporter.com / www.ifit-eg.com ."
-
-    if packs:
-        if pack and pack in packs:
-            return f"The {product} {pack} pack costs {_format_triplet(packs[pack])}. {note}"
-        if "2LB" in packs and "5LB" in packs:
-            return (
-                f"The {product} 2LB pack costs {_format_triplet(packs['2LB'])}. "
-                f"The {product} 5LB pack costs {_format_triplet(packs['5LB'])}. {note}"
-            )
-    if prices:
-        return f"The {product} pack costs {_format_triplet(prices)}. {note}"
-    return ""
-
-
 def _handle_discovery(state: ConversationState) -> str:
     def pick(options):
         idx = len(CONVERSATION_HISTORY.get(state.user_id, [])) % max(len(options), 1)
@@ -1227,37 +1188,15 @@ def _handle_discovery(state: ConversationState) -> str:
     return _grounded_reply(facts)
 
 
-def _handle_authenticity(message: str) -> str:
-    msg = _normalize(message)
-    if _contains_any(msg, ["no authenticity sticker", "no sticker", "without sticker", "sticker missing"]):
-        facts = (
-            "Unfortunately we cannot guarantee a product's authenticity without it having our sticker, "
-            "please get back to your point of sale."
-        )
-        return _grounded_reply(facts)
+def _handle_authenticity() -> str:
     facts = (
-        "All our authentic products come with an authenticity sticker, the sticker contains a code that you can use "
-        "on our website to affirm the product's authenticity. Please visit http://originalon.com"
+        "Authentic ON products have an authenticity sticker with a code you can verify at originalon.com. "
+        "If the sticker is missing, authenticity cannot be guaranteed."
     )
     return _grounded_reply(facts)
 
 
-def _handle_dietary(message: str) -> str:
-    msg = _normalize(message)
-    if _contains_any(msg, ["vegan"]):
-        facts = (
-            "Sorry but we don't have vegan protein at the moment. Please follow us to learn more about our latest products. Thanks"
-        )
-        return _grounded_reply(facts)
-    if _contains_any(msg, ["nutrition advice", "nutritional advice", "diet plan", "what should i take"]):
-        facts = "Optimum Nutrition does not offer nutritional advice, kindly visit a certified nutritionist."
-        return _grounded_reply(facts)
-    if _contains_any(msg, ["gluten"]):
-        facts = (
-            "Yes Optimum Nutrition Gold Standard 100% Whey is certified gluten-free (only exception is cookies and cream flavor). "
-            "The same is mentioned on the pack as well. However, in case of Celiac Disease or Gluten Intolerance always check with your physician before trying any new supplements. Hope this helps."
-        )
-        return _grounded_reply(facts)
+def _handle_dietary() -> str:
     facts = (
         "Gold Standard 100% Whey is certified gluten-free except Cookies and Cream flavor. "
         "We do not currently offer vegan protein."
@@ -1273,25 +1212,10 @@ def _handle_whey_vs_isolate() -> str:
     return _grounded_reply(facts)
 
 
-def _handle_where_to_buy(state: ConversationState) -> str:
-    country = state.selected_country
-    if country == "Egypt":
-        facts = (
-            "Our products are available on iFIT's website, iFIT is our exclusive agent in Egypt - you can visit their "
-            "website, view all the available products along with their prices, and even submit your order. For more information "
-            "please visit www.ifit-eg.com - you can also find our products available at El Ezaby Pharmacies, Khalil Pharmacies, "
-            "Max Muscle, and Bodybuilding House."
-        )
-        return _grounded_reply(facts)
-    if country in {"UAE", "KSA"}:
-        facts = (
-            "Our products are available at www.sporter.com, www.amazon.ae, and Dr. Nutrition. "
-            "You can also find our products at Life Pharmacies in the UAE."
-        )
-        return _grounded_reply(facts)
+def _handle_where_to_buy() -> str:
     facts = (
-        "Our products are available at www.sporter.com, www.amazon.ae, and Dr. Nutrition (UAE/KSA), and in Egypt via www.ifit-eg.com "
-        "plus El Ezaby Pharmacies, Khalil Pharmacies, Max Muscle, and Bodybuilding House."
+        "UAE & KSA: available at www.sporter.com, www.amazon.ae, and Dr. Nutrition; also Life Pharmacies in UAE. "
+        "Egypt: available through iFIT at www.ifit-eg.com and at El Ezaby, Khalil, Max Muscle, and Bodybuilding House."
     )
     return _grounded_reply(facts)
 
@@ -1533,11 +1457,6 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         if _needs_pack(state.selected_product) and not state.selected_pack:
             return finish(_ask_for_missing(state, "pack"))
 
-        if not state.selected_country and _wants_full_price_answer(message):
-            full = _full_price_answer(state.selected_product, state.selected_pack)
-            if full:
-                return finish(_grounded_reply(full))
-
         if not state.selected_country:
             return finish(_ask_for_missing(state, "country"))
 
@@ -1574,14 +1493,14 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         return finish(_grounded_reply(facts))
 
     if intent == "authenticity":
-        return finish(_handle_authenticity(message))
+        return finish(_handle_authenticity())
     if intent == "dietary":
         msg_norm = _normalize(message)
         if ("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm:
             return finish(_handle_whey_vs_isolate())
-        return finish(_handle_dietary(message))
+        return finish(_handle_dietary())
     if intent == "where_to_buy":
-        return finish(_handle_where_to_buy(state))
+        return finish(_handle_where_to_buy())
     if intent == "smalltalk":
         return finish(_handle_smalltalk(message, state))
     if intent == "confirm":
