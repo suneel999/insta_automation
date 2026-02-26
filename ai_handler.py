@@ -310,6 +310,45 @@ def _safety_guard_response(message: str, state: ConversationState, entities: dic
     return response_text
 
 
+def _semantic_guard_response(message: str, state: ConversationState, entities: dict, response_text: str) -> str:
+    text = response_text.lower()
+
+    # 1) Listing request must not drift into pricing.
+    if _is_category_listing_request(message):
+        if "price in" in text or "which country" in text:
+            return _handle_discovery(state)
+
+    # 2) If we have enough slots for price and response doesn't answer price, enforce deterministic resolution.
+    if (entities.get("intent") == "price" or state.pending_intent == "price") and state.selected_product:
+        country = state.selected_country or entities.get("country")
+        if country and "price in" not in text and "do not have" not in text:
+            if state.requested_both_packs and _needs_pack(state.selected_product):
+                packs = PRICING_DATA.get(state.selected_product, {}).get("packs", {})
+                p2 = packs.get("2LB", {}).get(country)
+                p5 = packs.get("5LB", {}).get(country)
+                if p2 and p5:
+                    facts = (
+                        f"{state.selected_product} prices in {country}: 2LB is {p2} and 5LB is {p5}. "
+                        "If you want, I can also share another country."
+                    )
+                    return _grounded_reply(facts)
+            resolved = _resolve_price(state.selected_product, country, state.selected_pack)
+            if resolved.get("status") == "ok":
+                pack_text = f" ({resolved['pack']})" if resolved.get("pack") else ""
+                facts = (
+                    f"{state.selected_product}{pack_text} price in {country} is {resolved['value']}. "
+                    "If you want, I can also share prices for another country."
+                )
+                return _grounded_reply(facts)
+
+    # 3) Pronoun follow-up should not bounce to generic category lists.
+    if _is_pronoun_reference(message) and state.last_product_mentioned:
+        if "main categories" in text or "choose one category" in text:
+            return _handle_product_info(state.last_product_mentioned, state)
+
+    return response_text
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9\s]", " ", text.lower()).strip()
 
@@ -1244,6 +1283,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
 
     def finish(text: str) -> str:
         safe = _safety_guard_response(message, state, entities, text)
+        safe = _semantic_guard_response(message, state, entities, safe)
         _save_user_context(user_id, state, history)
         return safe
 
