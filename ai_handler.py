@@ -1516,6 +1516,12 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
 
     if intent == "greeting":
         if state.pending_intent == "price":
+            # Treat a pure greeting as a fresh turn and drop stale pricing slots.
+            if not any(
+                [entities.get("product"), entities.get("country"), entities.get("pack"), entities.get("category")]
+            ):
+                _clear_pricing_state(state)
+                return finish(_handle_smalltalk(message, state))
             if not state.selected_product:
                 return finish(_grounded_reply(
                     "Hi. To continue pricing, tell me the product name."
