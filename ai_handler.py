@@ -618,8 +618,8 @@ def _is_broad_listing_request(message: str) -> bool:
 
 def _is_category_listing_request(message: str) -> bool:
     msg = _normalize(message)
-    has_list_verb = any(v in msg for v in ["list", "show", "tell me", "what", "which"])
-    has_category_word = "category" in msg or "categories" in msg
+    has_list_verb = any(v in msg for v in ["list", "show", "give", "share"])
+    has_category_word = any(w in msg for w in ["category", "categories", "product", "products"])
     has_category_value = _detect_category(message) is not None
     has_price_signal = _contains_fuzzy_keyword(msg, PRICE_KEYWORDS)
     return has_category_value and (has_list_verb or has_category_word) and not has_price_signal
@@ -937,6 +937,9 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     # Guard intent priority: explicit price wording must remain price.
     if _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS) and entities.get("intent") != "price":
         entities["intent"] = "price"
+    # Hard guard for Whey vs Isolate comparison question.
+    if (("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm):
+        entities["intent"] = "dietary"
 
     # Hard guard: category listing requests must stay in discovery flow.
     if _is_category_listing_request(message):
@@ -1203,8 +1206,8 @@ def _handle_dietary() -> str:
 
 def _handle_whey_vs_isolate() -> str:
     facts = (
-        "Gold Standard Isolate has lower fat and higher protein per serving than Gold Standard Whey. "
-        "Gold Standard Whey is certified gluten-free except Cookies and Cream flavor."
+        "The Gold Standard Isolate offers much lower fat levels and higher protein levels in each serving, "
+        "it's ultra-filtered Whey Protein."
     )
     return _grounded_reply(facts)
 
