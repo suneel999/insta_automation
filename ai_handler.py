@@ -1035,39 +1035,55 @@ def _ai_rag_reply(message: str, state: ConversationState, fallback: str) -> str:
 
 
 def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
+    def pick(options):
+        idx = len(CONVERSATION_HISTORY.get(state.user_id, [])) % max(len(options), 1)
+        return options[idx]
+
     repeat = state.last_asked == missing_field
     state.last_asked = missing_field
 
     if missing_field == "product":
         if state.selected_category in CATEGORY_PRODUCTS:
             items = ", ".join(CATEGORY_PRODUCTS[state.selected_category])
-            facts = (
-                f"Please pick one product from {state.selected_category}: {items}. "
-                "Send the product name and I will continue pricing."
-            )
+            facts = pick([
+                f"Please pick one product from {state.selected_category}: {items}. Send the product name and I’ll continue pricing.",
+                f"From {state.selected_category}, choose one: {items}. I’ll continue right after that.",
+            ])
             state.last_asked = "product_from_category"
             return _grounded_reply(facts)
 
-        facts = (
-            "I need the product name to continue. "
-            "You can send one: Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey."
-        )
+        facts = pick([
+            "I just need the product name to continue. You can send Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey.",
+            "Please share the product name so I can continue. For example: Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey.",
+        ])
         if not repeat:
-            facts = (
-                "Which product price do you want? "
-                "You can choose Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey."
-            )
+            facts = pick([
+                "Which product price do you want? You can choose Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey.",
+                "Which product price should I check? Options: Gold Standard 100% Whey, Serious Mass, Platinum HydroWhey.",
+            ])
         return _grounded_reply(facts)
 
     if missing_field == "pack":
-        facts = f"I need the pack size for {state.selected_product}: 2LB or 5LB."
+        facts = pick([
+            f"I need the pack size for {state.selected_product}: 2LB or 5LB.",
+            f"For {state.selected_product}, which pack do you want: 2LB or 5LB?",
+        ])
         if not repeat:
-            facts = f"For {state.selected_product}, which pack do you want: 2LB or 5LB?"
+            facts = pick([
+                f"For {state.selected_product}, which pack do you want: 2LB or 5LB?",
+                f"Got it. Choose the pack for {state.selected_product}: 2LB or 5LB.",
+            ])
         return _grounded_reply(facts)
 
-    facts = "I need your country to give exact pricing: UAE, KSA, or Egypt."
+    facts = pick([
+        "I need your country to give exact pricing: UAE, KSA, or Egypt.",
+        "To give the exact price, tell me your country: UAE, KSA, or Egypt.",
+    ])
     if not repeat:
-        facts = "To give the exact price, which country are you in: UAE, KSA, or Egypt?"
+        facts = pick([
+            "To give the exact price, which country are you in: UAE, KSA, or Egypt?",
+            "Which country should I check pricing for: UAE, KSA, or Egypt?",
+        ])
     return _grounded_reply(facts)
 
 
@@ -1101,22 +1117,31 @@ def _resolve_price(product: str, country: str, pack: Optional[str]) -> dict:
 
 
 def _handle_discovery(state: ConversationState) -> str:
+    def pick(options):
+        idx = len(CONVERSATION_HISTORY.get(state.user_id, [])) % max(len(options), 1)
+        return options[idx]
+
     category = state.selected_category
     if category in CATEGORY_PRODUCTS:
         items = ", ".join(CATEGORY_PRODUCTS[category])
-        facts = (
-            f"Our {category} products are: {items}. "
-            "Tell me one product name if you want details or price."
-        )
+        facts = pick([
+            f"Our {category} products are: {items}. Want details or price for one of these?",
+            f"Our {category} products are: {items}. Which one should I help with?",
+            f"Our {category} products are: {items}. Send one product name and I’ll continue.",
+        ])
         state.last_asked = f"discovery_{category}"
         return _grounded_reply(facts)
 
-    facts = (
-        "Our main categories are Protein, Energy & Aminos, Pre-Workout, Recovery, and Vitamins/Health. "
-        "Which category do you want to see products for?"
-    )
+    facts = pick([
+        "Our main categories are Protein, Energy & Aminos, Pre-Workout, Recovery, and Vitamins/Health. Which category do you want?",
+        "Our main categories are Protein, Energy & Aminos, Pre-Workout, Recovery, and Vitamins/Health. Which one should I open for you?",
+        "Our main categories are Protein, Energy & Aminos, Pre-Workout, Recovery, and Vitamins/Health. Which category are you interested in?",
+    ])
     if state.last_asked == "discovery_generic":
-        facts = "Please choose one category: Protein, Energy & Aminos, Pre-Workout, Recovery, or Vitamins/Health."
+        facts = pick([
+            "Please pick one category: Protein, Energy & Aminos, Pre-Workout, Recovery, or Vitamins/Health.",
+            "Share one category to continue: Protein, Energy & Aminos, Pre-Workout, Recovery, or Vitamins/Health.",
+        ])
     state.last_asked = "discovery_generic"
     return _grounded_reply(facts)
 
