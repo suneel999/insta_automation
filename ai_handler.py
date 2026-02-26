@@ -1264,6 +1264,14 @@ def _handle_confirm(state: ConversationState) -> str:
     return _handle_smalltalk("ok", state)
 
 
+def _handle_unknown_query() -> str:
+    facts = (
+        "I may not have that specific information in this chat yet. "
+        "For the latest details, please visit www.sporter.com (UAE/KSA) or www.ifit-eg.com (Egypt)."
+    )
+    return _grounded_reply(facts)
+
+
 def _should_clear_pricing_context(intent: Optional[str]) -> bool:
     return intent in {"authenticity", "dietary", "discovery", "where_to_buy"}
 
@@ -1518,5 +1526,10 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                     "Hi. To continue pricing, tell me your country: UAE, KSA, or Egypt."
                 ))
         return finish(_handle_smalltalk(message, state))
+
+    if not intent and not any(
+        [entities.get("product"), entities.get("country"), entities.get("pack"), entities.get("category")]
+    ):
+        return finish(_handle_unknown_query())
 
     return finish(_ai_rag_reply(message, state, _handle_discovery(state)))
