@@ -1193,7 +1193,13 @@ def _handle_smalltalk(message: str, state: ConversationState) -> str:
     return _ai_rag_reply(message, state, fallback)
 
 
-def _handle_product_info(product: str) -> str:
+def _handle_product_info(product: str, state: ConversationState) -> str:
+    # If user asks for product info, keep pricing continuation open for country follow-up.
+    state.pending_intent = "price"
+    state.mode = "transaction"
+    state.selected_product = product
+    state.last_product_mentioned = product
+    state.last_asked = "country"
     category = PRODUCT_TO_CATEGORY.get(product, "products")
     pretty_category = "Vitamins/Health" if category == "vitamins" else category.title()
     facts = (
@@ -1453,7 +1459,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         and intent not in {"price", "authenticity", "dietary", "where_to_buy"}
         and not _contains_fuzzy_keyword(_normalize(message), PRICE_KEYWORDS)
     ):
-        return finish(_handle_product_info(entities["product"]))
+        return finish(_handle_product_info(entities["product"], state))
     if intent == "discovery":
         return finish(_handle_discovery(state))
 
