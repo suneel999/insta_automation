@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # --- MEMORY STORE ---
 USER_STATES = {}  # { user_id: ConversationState }
 CONVERSATION_HISTORY = {}  # { user_id: [str] }
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "25"))
 DB_LOCK = threading.Lock()
 STATE_DB_PATH = os.getenv("STATE_DB_PATH", os.path.join(os.path.dirname(__file__), "conversation_state.db"))
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", "43200"))
@@ -259,7 +260,7 @@ def _load_user_context(user_id: str):
                 if not isinstance(history, list):
                     history = []
                 USER_STATES[user_id] = state
-                CONVERSATION_HISTORY[user_id] = history[-10:]
+                CONVERSATION_HISTORY[user_id] = history[-MAX_HISTORY_TURNS:]
                 return state, CONVERSATION_HISTORY[user_id]
         except Exception as e:
             logger.error(f"Redis read failed for {user_id}: {e}")
@@ -291,13 +292,13 @@ def _load_user_context(user_id: str):
                 history = []
 
     USER_STATES[user_id] = state
-    CONVERSATION_HISTORY[user_id] = history
+    CONVERSATION_HISTORY[user_id] = history[-MAX_HISTORY_TURNS:]
     return state, history
 
 
 def _save_user_context(user_id: str, state: ConversationState, history: list) -> None:
     USER_STATES[user_id] = state
-    CONVERSATION_HISTORY[user_id] = history[-10:]
+    CONVERSATION_HISTORY[user_id] = history[-MAX_HISTORY_TURNS:]
 
     r = _get_redis_client()
     if r is not None:
@@ -802,6 +803,28 @@ def _is_followup_phrase(message: str) -> bool:
     )
 
 
+def _is_context_followup_request(message: str) -> bool:
+    msg = _normalize(message)
+    if not msg:
+        return False
+    followup_tokens = [
+        "tell me more",
+        "more",
+        "what else",
+        "show more",
+        "about this",
+        "about it",
+        "details",
+        "tell me on",
+        "tell me about",
+    ]
+    if any(t in msg for t in followup_tokens):
+        return True
+    if msg in {"more", "details", "continue", "next"}:
+        return True
+    return False
+
+
 def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     msg = _normalize(message)
     words = msg.split()
@@ -848,6 +871,15 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     if msg in {"this", "that", "this one", "that one"} and state.last_priced_product:
         return "price"
     if _contains_fuzzy_keyword(msg, DISCOVERY_KEYWORDS):
+        return "discovery"
+    if (
+        _is_context_followup_request(message)
+        and state.selected_category
+        and not product_guess
+        and not country_guess
+        and not pack_guess
+        and state.pending_intent != "price"
+    ):
         return "discovery"
     if _is_greeting(msg) and (is_short or len(words) <= 6):
         return "greeting"
@@ -1019,6 +1051,15 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         entities["country"] = None
         entities["pack"] = None
         entities["both_packs"] = False
+
+    # If user is continuing category discussion, keep current selected category sticky.
+    if (
+        entities.get("intent") == "discovery"
+        and not entities.get("category")
+        and state.selected_category
+        and _is_context_followup_request(message)
+    ):
+        entities["category"] = state.selected_category
 
     # Continuity guards: in active pricing, do not let AI invent slot switches.
     if state.pending_intent == "price":
