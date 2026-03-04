@@ -851,6 +851,16 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
         return "discovery"
     if _is_greeting(msg) and (is_short or len(words) <= 6):
         return "greeting"
+    if (
+        is_short
+        and state.selected_category
+        and not product_guess
+        and not country_guess
+        and not pack_guess
+        and state.pending_intent != "price"
+    ):
+        # Keep short follow-ups inside currently selected category browsing.
+        return "discovery"
     if is_short and state.pending_intent == "price":
         # Continue active pricing flow for short replies like "hydro", "uae", "2lb".
         return "price"
@@ -1126,12 +1136,29 @@ def _generate_with_fallback(contents: str, config: dict):
     return None
 
 
-def _retrieve_kb_sections(message: str, limit: int = 3) -> Dict[str, str]:
-    msg_tokens = set([t for t in _normalize(message).split() if len(t) > 2])
+def _retrieve_kb_sections(message: str, state: ConversationState, limit: int = 3) -> Dict[str, str]:
+    context_seed = " ".join(
+        [
+            message or "",
+            state.selected_category or "",
+            state.selected_product or "",
+            state.last_product_mentioned or "",
+            state.pending_intent or "",
+            state.last_asked or "",
+        ]
+    )
+    msg_tokens = set([t for t in _normalize(context_seed).split() if len(t) > 2])
     scored = []
     for name, body in KB_SECTIONS.items():
         section_tokens = set([t for t in _normalize(name + " " + body).split() if len(t) > 2])
         score = len(msg_tokens.intersection(section_tokens))
+        name_norm = _normalize(name)
+        if state.pending_intent == "price" and "pricing" in name_norm:
+            score += 2
+        if state.selected_category and state.selected_category in name_norm:
+            score += 2
+        if state.selected_product and _normalize(state.selected_product) in _normalize(body):
+            score += 2
         if score > 0:
             scored.append((name, body, score))
     scored.sort(key=lambda x: x[2], reverse=True)
@@ -1143,7 +1170,7 @@ def _ai_rag_reply(message: str, state: ConversationState, fallback: str) -> str:
     if not client:
         return fallback
 
-    sections = _retrieve_kb_sections(message, limit=3)
+    sections = _retrieve_kb_sections(message, state, limit=3)
     if not sections:
         return fallback
     section_text = "\n\n".join([f"[{k}]\n{v}" for k, v in sections.items()])
