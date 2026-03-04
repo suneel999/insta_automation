@@ -965,8 +965,8 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         entities = {
             "intent": ai.get("intent") or deterministic["intent"],
             "product": ai.get("product") or deterministic["product"],
-            "country": ai.get("country") or deterministic["country"],
-            "pack": ai.get("pack") or deterministic["pack"],
+            "country": deterministic["country"] or ai.get("country"),
+            "pack": deterministic["pack"] or ai.get("pack"),
             "category": ai.get("category") or deterministic["category"],
             "both_packs": ai.get("both_packs") or deterministic["both_packs"],
         }
@@ -994,6 +994,25 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         entities["country"] = None
         entities["pack"] = None
         entities["both_packs"] = False
+
+    # Continuity guards: in active pricing, do not let AI invent slot switches.
+    if state.pending_intent == "price":
+        explicit_product = _has_explicit_product_mention(message)
+        if not explicit_product and entities.get("product") and state.selected_product:
+            entities["product"] = state.selected_product
+        if state.last_asked == "pack" and deterministic.get("pack"):
+            # User answered pack; country must not be inferred on this turn.
+            entities["country"] = deterministic.get("country")
+        if state.last_asked == "country" and deterministic.get("country") and state.selected_product:
+            entities["intent"] = "price"
+
+    # Country-only follow-up after a recent price should continue pricing.
+    if (
+        entities.get("country")
+        and not _contains_fuzzy_keyword(msg_norm, WHERE_BUY_KEYWORDS)
+        and (state.pending_intent == "price" or state.selected_product or state.last_priced_product)
+    ):
+        entities["intent"] = "price"
 
     # Pronoun follow-ups should map to the last referenced product.
     if _is_pronoun_reference(message) and not entities.get("product"):
