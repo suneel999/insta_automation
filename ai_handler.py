@@ -12,13 +12,11 @@ import sqlite3
 import threading
 import time
 from typing import Dict, Optional
-from types import SimpleNamespace
 try:
     import redis as redis_lib
 except Exception:
     redis_lib = None
 from google import genai
-import requests
 from dotenv import load_dotenv
 from on_knowledge import ON_KNOWLEDGE_BASE
 
@@ -149,9 +147,7 @@ class ConversationState:
         return state
 
 
-# Configure LLM clients (Groq first, Gemini fallback)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip()
+# Configure Gemini client
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 MODEL_CANDIDATES = [
@@ -164,51 +160,6 @@ MODEL_CANDIDATES = [m for m in MODEL_CANDIDATES if m]
 WORKING_MODEL = None
 AI_DISABLED = False
 AI_DISABLED_UNTIL = 0
-
-
-def _generate_with_groq(contents: str, config: dict):
-    if not GROQ_API_KEY:
-        return None
-    system_instruction = config.get("system_instruction") or (
-        "You are a concise assistant. Return only the requested output."
-    )
-    temperature = float(config.get("temperature", 0.1))
-    max_tokens = int(config.get("max_output_tokens", 120))
-    response_format = None
-    if config.get("response_mime_type") == "application/json":
-        response_format = {"type": "json_object"}
-    body = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": contents},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    if response_format:
-        body["response_format"] = response_format
-    resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=15,
-    )
-    if resp.status_code == 429:
-        raise RuntimeError("429")
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Groq error {resp.status_code}: {resp.text[:200]}")
-    data = resp.json()
-    text = (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
-    return SimpleNamespace(text=text)
 
 
 def _ensure_state_db() -> None:
@@ -880,7 +831,7 @@ def _detect_category(message: str) -> Optional[str]:
 
 
 def _ai_extract_first(message: str, state: ConversationState) -> dict:
-    if (not GROQ_API_KEY and not client) or AI_DISABLED:
+    if not client or AI_DISABLED:
         return {}
     prompt = f"""Extract JSON only. Keys: intent, product, country, pack, category, both_packs, confidence.
 message: "{message}"
@@ -1017,23 +968,24 @@ def extract_entities(message: str, state: ConversationState) -> dict:
 
 
 def _grounded_reply(facts: str, style_instruction: str = "") -> str:
-    if not GROQ_API_KEY and not client:
+    if not client:
         return facts
     style_hint = (
-        "Friendly, concise tone. Sound human and direct."
+        "Friendly and natural tone. Keep it clear and helpful."
         if RESPONSE_STYLE == "friendly_concise"
         else "Answer naturally and clearly."
     )
     system = (
         "You are Optimum Nutrition Instagram DM assistant. "
         "Use ONLY provided facts. Do not add any new data. "
-        "Max 2 short sentences. Ask only one missing detail when needed."
+        "Prefer concise replies, but use up to 4 sentences when needed for clarity. "
+        "Ask only one missing detail when needed."
     )
     prompt = f"Facts:\n{facts}\n\nTask:\n{style_instruction or style_hint}"
     try:
         response = _generate_with_fallback(
             prompt,
-            {"system_instruction": system, "temperature": 0.1, "max_output_tokens": 120},
+            {"system_instruction": system, "temperature": 0.2, "max_output_tokens": 220},
         )
         text = response.text.strip() if response and response.text else ""
         return text or facts
@@ -1046,31 +998,13 @@ def _generate_with_fallback(contents: str, config: dict):
     global WORKING_MODEL
     global AI_DISABLED
     global AI_DISABLED_UNTIL
-    if not GROQ_API_KEY and not client:
+    if not client:
         return None
     if AI_DISABLED and time.time() < AI_DISABLED_UNTIL:
         return None
     if AI_DISABLED and time.time() >= AI_DISABLED_UNTIL:
         AI_DISABLED = False
 
-    # Try Groq first for primary conversational generation.
-    if GROQ_API_KEY:
-        try:
-            response = _generate_with_groq(contents, config)
-            if response:
-                return response
-        except Exception as e:
-            err = str(e)
-            if "429" in err:
-                AI_DISABLED = True
-                AI_DISABLED_UNTIL = time.time() + AI_RATE_LIMIT_COOLDOWN_SECONDS
-                logger.warning("Groq quota exhausted; temporary cooldown enabled for AI calls.")
-                return None
-            logger.error(f"Groq call failed: {e}")
-
-    # Gemini fallback path.
-    if not client:
-        return None
     models = [WORKING_MODEL] + MODEL_CANDIDATES if WORKING_MODEL else MODEL_CANDIDATES
     tried = set()
     for model in models:
@@ -1110,22 +1044,20 @@ def _retrieve_kb_sections(message: str, limit: int = 3) -> Dict[str, str]:
 
 
 def _ai_rag_reply(message: str, state: ConversationState, fallback: str) -> str:
-    if not GROQ_API_KEY and not client:
+    if not client:
         return fallback
 
     sections = _retrieve_kb_sections(message, limit=3)
     if not sections:
-        sections = {
-            "WELCOME/GREETING": KB_SECTIONS.get("WELCOME/GREETING", ""),
-            "PRODUCT OVERVIEW": KB_SECTIONS.get("PRODUCT OVERVIEW", ""),
-        }
+        return fallback
     section_text = "\n\n".join([f"[{k}]\n{v}" for k, v in sections.items()])
     history_hint = ", ".join(CONVERSATION_HISTORY.get(state.user_id, [])[-4:])
     prompt = (
         f"User message: {message}\n"
         f"Recent conversation: {history_hint}\n"
         f"Available KB sections:\n{section_text}\n\n"
-        "Answer naturally in max 2 sentences using ONLY these sections. "
+        "Answer naturally using ONLY these sections. "
+        "Use detail when needed (up to 4 sentences). "
         "If pricing is requested but missing required fields, ask only one missing field."
     )
     response = _generate_with_fallback(
