@@ -12,11 +12,13 @@ import sqlite3
 import threading
 import time
 from typing import Dict, Optional
+from types import SimpleNamespace
 try:
     import redis as redis_lib
 except Exception:
     redis_lib = None
 from google import genai
+import requests
 from dotenv import load_dotenv
 from on_knowledge import ON_KNOWLEDGE_BASE
 
@@ -147,7 +149,9 @@ class ConversationState:
         return state
 
 
-# Configure Gemini client
+# Configure OpenAI (primary) and Gemini (fallback)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 MODEL_CANDIDATES = [
@@ -160,6 +164,48 @@ MODEL_CANDIDATES = [m for m in MODEL_CANDIDATES if m]
 WORKING_MODEL = None
 AI_DISABLED = False
 AI_DISABLED_UNTIL = 0
+
+
+def _generate_with_openai(contents: str, config: dict):
+    if not OPENAI_API_KEY:
+        return None
+    system_instruction = config.get("system_instruction") or (
+        "You are a concise assistant. Return only the requested output."
+    )
+    temperature = float(config.get("temperature", 0.2))
+    max_tokens = int(config.get("max_output_tokens", 220))
+    body = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": contents},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if config.get("response_mime_type") == "application/json":
+        body["response_format"] = {"type": "json_object"}
+    resp = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=20,
+    )
+    if resp.status_code == 429:
+        raise RuntimeError("429")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text[:240]}")
+    data = resp.json()
+    text = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
+    return SimpleNamespace(text=text)
 
 
 def _ensure_state_db() -> None:
@@ -998,13 +1044,29 @@ def _generate_with_fallback(contents: str, config: dict):
     global WORKING_MODEL
     global AI_DISABLED
     global AI_DISABLED_UNTIL
-    if not client:
+    if not OPENAI_API_KEY and not client:
         return None
     if AI_DISABLED and time.time() < AI_DISABLED_UNTIL:
         return None
     if AI_DISABLED and time.time() >= AI_DISABLED_UNTIL:
         AI_DISABLED = False
 
+    if OPENAI_API_KEY:
+        try:
+            response = _generate_with_openai(contents, config)
+            if response:
+                return response
+        except Exception as e:
+            err = str(e)
+            if "429" in err:
+                AI_DISABLED = True
+                AI_DISABLED_UNTIL = time.time() + AI_RATE_LIMIT_COOLDOWN_SECONDS
+                logger.warning("OpenAI quota exhausted; temporary cooldown enabled for AI calls.")
+                return None
+            logger.error(f"OpenAI call failed: {e}")
+
+    if not client:
+        return None
     models = [WORKING_MODEL] + MODEL_CANDIDATES if WORKING_MODEL else MODEL_CANDIDATES
     tried = set()
     for model in models:
