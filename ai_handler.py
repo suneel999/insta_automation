@@ -65,6 +65,7 @@ CATEGORY_PRODUCTS = {
     ],
     "energy": [
         "Essential Amin.O. Energy",
+        "Essential Amin.O. Energy + Electrolytes",
     ],
     "pre-workout": [
         "Gold Standard Pre-Workout",
@@ -371,13 +372,13 @@ def _semantic_guard_response(message: str, state: ConversationState, entities: d
         if country and "price in" not in text and "do not have" not in text:
             if state.requested_both_packs and _needs_pack(state.selected_product):
                 packs = PRICING_DATA.get(state.selected_product, {}).get("packs", {})
-                p2 = packs.get("2LB", {}).get(country)
-                p5 = packs.get("5LB", {}).get(country)
-                if p2 and p5:
-                    facts = (
-                        f"{state.selected_product} prices in {country}: 2LB is {p2} and 5LB is {p5}. "
-                        "If you want, I can also share another country."
-                    )
+                pack_parts = []
+                for pack_name, country_prices in packs.items():
+                    value = country_prices.get(country)
+                    if value:
+                        pack_parts.append(f"{pack_name} is {value}")
+                if len(pack_parts) >= 2:
+                    facts = f"{state.selected_product} prices in {country}: " + " and ".join(pack_parts) + ". If you want, I can also share another country."
                     return _grounded_reply(facts)
             resolved = _resolve_price(state.selected_product, country, state.selected_pack)
             if resolved.get("status") == "ok":
@@ -402,7 +403,30 @@ def _normalize(text: str) -> str:
 
 def _to_pack(raw: str) -> str:
     value = raw.upper().replace(" ", "")
-    return value.replace("LBS", "LB")
+    value = value.replace("LBS", "LB")
+    value = value.replace("KGS", "KG")
+    if value.endswith("GM"):
+        value = value[:-2] + "G"
+    if value.endswith(".0LB"):
+        value = value.replace(".0LB", "LB")
+    if value.endswith(".0KG"):
+        value = value.replace(".0KG", "KG")
+    return value
+
+
+def _pack_options(product: str) -> list:
+    packs = PRICING_DATA.get(product, {}).get("packs", {})
+    keys = list(packs.keys())
+
+    def _pack_sort_key(p: str):
+        m = re.match(r"^([0-9]+(?:\.[0-9]+)?)([A-Z]+)$", p)
+        if not m:
+            return (99, 0.0, p)
+        unit = m.group(2)
+        unit_rank = {"G": 1, "KG": 2, "LB": 3}.get(unit, 9)
+        return (unit_rank, float(m.group(1)), p)
+
+    return sorted(keys, key=_pack_sort_key)
 
 
 def _extract_country(segment: str) -> Optional[str]:
@@ -465,7 +489,7 @@ def _parse_pricing_kb(kb_text: str) -> Dict[str, dict]:
             products[current_product]["note"] = note_match.group(1).strip()
             content = re.sub(r"\([^)]*\)", "", content).strip()
 
-        m_pack = re.match(r"^([0-9]+\s*LB[S]?)\s*:\s*(.+)$", content, flags=re.IGNORECASE)
+        m_pack = re.match(r"^([0-9]+(?:\.[0-9]+)?\s*(?:LB[S]?|G|GM|KG[S]?))\s*:\s*(.+)$", content, flags=re.IGNORECASE)
         if m_pack:
             pack = _to_pack(m_pack.group(1))
             prices = _extract_prices(m_pack.group(2).strip())
@@ -515,6 +539,9 @@ PRODUCT_ALIASES = {
     "casein": "Gold Standard 100% Casein",
     "amino": "Essential Amin.O. Energy",
     "amino energy": "Essential Amin.O. Energy",
+    "electrolytes": "Essential Amin.O. Energy + Electrolytes",
+    "amino energy electrolytes": "Essential Amin.O. Energy + Electrolytes",
+    "essential amino energy electrolytes": "Essential Amin.O. Energy + Electrolytes",
     "pre workout": "Gold Standard Pre-Workout",
     "creatine": "Micronized Creatine Powder",
     "isolate": "Gold Standard 100% Isolate",
@@ -572,11 +599,14 @@ WHERE_BUY_KEYWORDS = [
     "official website",
 ]
 SMALLTALK_KEYWORDS = ["thanks", "thank you", "ok", "okay", "great", "awesome", "cool", "good morning", "good evening"]
+AVAILABILITY_KEYWORDS = ["available", "availability", "in stock", "stock", "out of stock", "unavailable"]
+OFFERS_KEYWORDS = ["offer", "offers", "discount", "sale", "on offer", "promotion", "promo", "11 11", "white friday"]
 RESPONSE_STYLE = os.getenv("RESPONSE_STYLE", "friendly_concise")
+ACTIVE_OFFER = os.getenv("ACTIVE_OFFER", "none").strip().lower()
 
 
 def _detect_pack(message: str) -> Optional[str]:
-    m = re.search(r"\b([0-9]+\s*lb[s]?)\b", message, flags=re.IGNORECASE)
+    m = re.search(r"\b([0-9]+(?:\.[0-9]+)?\s*(?:lb[s]?|g|gm|kg[s]?))\b", message, flags=re.IGNORECASE)
     return _to_pack(m.group(1)) if m else None
 
 
@@ -632,22 +662,19 @@ def _contains_dietary_marker(msg: str) -> bool:
 
 
 def _is_greeting(msg: str) -> bool:
-    words = set(msg.split())
-    if words.intersection({"hi", "hello", "hey", "hii", "heyy", "heyyy", "morning", "afternoon", "evening"}):
+    words = [w for w in msg.split() if w]
+    if not words:
+        return False
+    if len(words) <= 4 and any(w in {"hi", "hello", "hey", "hii", "heyy", "heyyy"} for w in words):
         return True
-    if any(re.fullmatch(r"h+i+", w) for w in words):
+    first = words[0]
+    if re.fullmatch(r"h+i+", first):
         return True
-    # Tolerate distorted greeting spellings like "helooo", "hyy", "helloooo".
-    for w in words:
-        if len(w) < 2:
-            continue
-        simplified = re.sub(r"(.)\1{2,}", r"\1\1", w)
-        if simplified.startswith("hel"):
-            return True
-        if difflib.get_close_matches(w, ["hi", "hey", "hello"], n=1, cutoff=0.65):
-            return True
-        if difflib.get_close_matches(simplified, ["hi", "hey", "hello"], n=1, cutoff=0.65):
-            return True
+    simplified = re.sub(r"(.)\1{2,}", r"\1\1", first)
+    if simplified.startswith("hel") or simplified in {"hi", "hey", "hello"}:
+        return True
+    if len(words) <= 3 and any(w in {"morning", "afternoon", "evening"} for w in words):
+        return True
     return False
 
 
@@ -836,6 +863,19 @@ def _is_context_followup_request(message: str) -> bool:
     return False
 
 
+def _is_pure_greeting_message(msg: str) -> bool:
+    tokens = [t for t in msg.split() if t]
+    if not tokens or len(tokens) > 4:
+        return False
+    allowed = {"hi", "hii", "hiii", "hello", "hey", "heyy", "heyyy", "good", "morning", "evening", "afternoon"}
+    if all(t in allowed for t in tokens):
+        return True
+    # Common compact variants like "hiiii" or "hellooo".
+    if len(tokens) == 1 and _is_greeting(tokens[0]):
+        return True
+    return False
+
+
 def _is_nutrition_advice_query(msg: str) -> bool:
     advisory_phrases = [
         "why protein",
@@ -876,8 +916,18 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     # Price signals first for transactional questions.
     if _contains_fuzzy_keyword(msg, PRICE_KEYWORDS):
         return "price"
+    if _contains_fuzzy_keyword(msg, OFFERS_KEYWORDS):
+        return "offers"
     if _contains_fuzzy_keyword(msg, WHERE_BUY_KEYWORDS):
         return "where_to_buy"
+    if _contains_fuzzy_keyword(msg, AVAILABILITY_KEYWORDS) and (
+        product_guess
+        or _is_pronoun_reference(message)
+        or state.selected_product
+        or state.last_product_mentioned
+        or state.last_priced_product
+    ):
+        return "availability"
     if category_guess and not _contains_fuzzy_keyword(msg, PRICE_KEYWORDS):
         return "discovery"
     if _is_affirmative(message):
@@ -966,9 +1016,9 @@ memory:
 - last_priced_country: "{state.last_priced_country or ''}"
 
 Rules:
-- Allowed intents: price, discovery, authenticity, greeting, dietary, where_to_buy, smalltalk, confirm, null.
+- Allowed intents: price, discovery, authenticity, greeting, dietary, where_to_buy, availability, offers, smalltalk, confirm, null.
 - country must be one of UAE,KSA,Egypt,null.
-- pack must be 2LB/5LB or null.
+- pack must be a valid pack token (examples: 2LB, 5LB, 10LB, 300G, 600G, 1.8LB) or null.
 - both_packs must be true/false.
 - confidence is 0.0 to 1.0.
 - Use memory for short follow-ups like "this", "that", "and in ksa", "both prices".
@@ -985,7 +1035,7 @@ Rules:
 
 
 def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
-    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", "where_to_buy", "smalltalk", "confirm", None}
+    allowed_intents = {"price", "discovery", "authenticity", "greeting", "dietary", "where_to_buy", "smalltalk", "confirm", "availability", "offers", None}
     intent = ai_entities.get("intent")
     if intent not in allowed_intents:
         intent = None
@@ -996,8 +1046,6 @@ def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
 
     pack = ai_entities.get("pack")
     pack = _to_pack(str(pack)) if pack else None
-    if pack and pack not in {"2LB", "5LB"}:
-        pack = None
 
     category = _detect_category(str(ai_entities.get("category") or ""))
     product = _detect_product(str(ai_entities.get("product") or ""), state)
@@ -1024,7 +1072,7 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     msg_norm = _normalize(message)
     # Hard greeting priority: exact/simple greetings must reset conversational intent,
     # even if AI inference tries to continue a previous transactional flow.
-    if _is_greeting(msg_norm) and not _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS):
+    if _is_pure_greeting_message(msg_norm) and not _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS):
         return {
             "intent": "greeting",
             "product": None,
@@ -1083,6 +1131,18 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         entities["country"] = None
         entities["pack"] = None
         entities["both_packs"] = False
+    if _contains_fuzzy_keyword(msg_norm, OFFERS_KEYWORDS):
+        entities["intent"] = "offers"
+    if _contains_fuzzy_keyword(msg_norm, AVAILABILITY_KEYWORDS):
+        entities["intent"] = "availability"
+        if not entities.get("product"):
+            entities["product"] = (
+                state.selected_product
+                or state.last_product_mentioned
+                or state.last_priced_product
+            )
+        entities["country"] = None
+        entities["pack"] = None
     # Hard guard for Whey vs Isolate comparison question.
     if (("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm):
         entities["intent"] = "dietary"
@@ -1359,14 +1419,16 @@ def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
         return _grounded_reply(facts, strict=True)
 
     if missing_field == "pack":
+        pack_opts = _pack_options(state.selected_product or "")
+        pack_text = " or ".join(pack_opts) if pack_opts else "pack size"
         facts = pick([
-            f"I need the pack size for {state.selected_product}: 2LB or 5LB.",
-            f"For {state.selected_product}, which pack do you want: 2LB or 5LB?",
+            f"I need the pack size for {state.selected_product}: {pack_text}.",
+            f"For {state.selected_product}, which pack do you want: {pack_text}?",
         ])
         if not repeat:
             facts = pick([
-                f"For {state.selected_product}, which pack do you want: 2LB or 5LB?",
-                f"Got it. Choose the pack for {state.selected_product}: 2LB or 5LB.",
+                f"For {state.selected_product}, which pack do you want: {pack_text}?",
+                f"Got it. Choose the pack for {state.selected_product}: {pack_text}.",
             ])
         return _grounded_reply(facts, strict=True)
 
@@ -1486,6 +1548,28 @@ def _handle_where_to_buy() -> str:
     return _grounded_reply(facts)
 
 
+def _handle_availability(product: Optional[str]) -> str:
+    if not product:
+        facts = "Please share the product name and I will check availability for you."
+        return _grounded_reply(facts, strict=True)
+    if product in PRICING_DATA:
+        facts = f"Yes, {product} is available."
+        return _grounded_reply(facts, strict=True)
+    facts = f"Unfortunately, {product} is currently unavailable/out of stock."
+    return _grounded_reply(facts, strict=True)
+
+
+def _handle_offers() -> str:
+    if ACTIVE_OFFER in {"11.11", "11_11", "11-11", "1111"}:
+        facts = "Our 11.11 Sale is currently live on www.amazon.ae and Noon, with up to 15% off on select products!"
+        return _grounded_reply(facts, strict=True)
+    if ACTIVE_OFFER in {"white_friday", "white friday", "white-friday"}:
+        facts = "Our White Friday Sale is currently live on www.amazon.ae and Noon, with up to 15% off on select products!"
+        return _grounded_reply(facts, strict=True)
+    facts = "For any ongoing offers, please check out www.sporter.com, www.amazon.ae, or Noon."
+    return _grounded_reply(facts, strict=True)
+
+
 def _handle_smalltalk(message: str, state: ConversationState) -> str:
     msg = _normalize(message)
     if "good morning" in msg or "morning" in msg:
@@ -1542,7 +1626,7 @@ def _handle_unknown_query() -> str:
 
 
 def _should_clear_pricing_context(intent: Optional[str]) -> bool:
-    return intent in {"authenticity", "dietary", "discovery", "where_to_buy"}
+    return intent in {"authenticity", "dietary", "discovery", "where_to_buy", "availability", "offers"}
 
 
 def _clear_pricing_state(state: ConversationState) -> None:
@@ -1647,7 +1731,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             if state.selected_product and _needs_pack(state.selected_product):
                 state.selected_pack = "__BOTH__"
         explicit_non_price = (
-            intent in {"dietary", "authenticity", "where_to_buy"}
+            intent in {"dietary", "authenticity", "where_to_buy", "availability", "offers"}
             or "gluten" in msg_norm
             or "vegan" in msg_norm
             or (("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm)
@@ -1655,6 +1739,10 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
             or "original" in msg_norm
             or "sticker" in msg_norm
             or "where" in msg_norm and ("buy" in msg_norm or "find" in msg_norm)
+            or "available" in msg_norm
+            or "stock" in msg_norm
+            or "offer" in msg_norm
+            or "sale" in msg_norm
         )
         expected_slot_filled = (
             (state.last_asked == "country" and entities.get("country"))
@@ -1699,7 +1787,10 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if _should_clear_pricing_context(intent):
         _clear_pricing_state(state)
 
-    if intent == "price" or (state.pending_intent == "price" and intent != "greeting"):
+    if intent == "price" or (
+        state.pending_intent == "price"
+        and intent not in {"greeting", "where_to_buy", "authenticity", "dietary", "availability", "offers", "discovery"}
+    ):
         state.mode = "transaction"
         state.pending_intent = "price"
 
@@ -1731,13 +1822,16 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                 return finish(_ask_for_missing(state, "country"))
             product_data = PRICING_DATA.get(state.selected_product, {})
             packs = product_data.get("packs", {})
-            p2 = packs.get("2LB", {}).get(state.selected_country)
-            p5 = packs.get("5LB", {}).get(state.selected_country)
-            if p2 and p5:
+            pack_parts = []
+            for pack_name, country_prices in packs.items():
+                value = country_prices.get(state.selected_country)
+                if value:
+                    pack_parts.append(f"{pack_name} is {value}")
+            if len(pack_parts) >= 2:
                 facts = (
                     f"{state.selected_product} prices in {state.selected_country}: "
-                    f"2LB is {p2} and 5LB is {p5}. "
-                    "If you want, I can also share another country."
+                    + " and ".join(pack_parts)
+                    + ". If you want, I can also share another country."
                 )
                 state.last_priced_product = state.selected_product
                 state.last_priced_pack = None
@@ -1755,7 +1849,9 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         if resolved["status"] == "missing_pack":
             return finish(_ask_for_missing(state, "pack"))
         if resolved["status"] == "unknown_pack":
-            facts = f"{state.selected_product} pack was not found in our KB. Please choose 2LB or 5LB."
+            options = _pack_options(state.selected_product or "")
+            options_text = " or ".join(options) if options else "a valid pack size"
+            facts = f"{state.selected_product} pack was not found in our KB. Please choose {options_text}."
             return finish(_grounded_reply(facts))
         if resolved["status"] == "missing_country_price":
             note = resolved.get("note")
@@ -1792,6 +1888,16 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         return finish(_handle_dietary(message))
     if intent == "where_to_buy":
         return finish(_handle_where_to_buy())
+    if intent == "offers":
+        return finish(_handle_offers())
+    if intent == "availability":
+        availability_product = (
+            entities.get("product")
+            or state.selected_product
+            or state.last_product_mentioned
+            or state.last_priced_product
+        )
+        return finish(_handle_availability(availability_product))
     if intent == "smalltalk":
         return finish(_handle_smalltalk(message, state))
     if intent == "confirm":
@@ -1824,8 +1930,10 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                     "Hi. To continue pricing, tell me the product name."
                 ))
             if _needs_pack(state.selected_product) and not state.selected_pack:
+                pack_opts = _pack_options(state.selected_product or "")
+                pack_text = " or ".join(pack_opts) if pack_opts else "a pack size"
                 return finish(_grounded_reply(
-                    f"Hi. To continue pricing for {state.selected_product}, tell me the pack size: 2LB or 5LB."
+                    f"Hi. To continue pricing for {state.selected_product}, tell me the pack size: {pack_text}."
                 ))
             if not state.selected_country:
                 return finish(_grounded_reply(
