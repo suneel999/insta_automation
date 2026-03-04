@@ -836,6 +836,25 @@ def _is_context_followup_request(message: str) -> bool:
     return False
 
 
+def _is_nutrition_advice_query(msg: str) -> bool:
+    advisory_phrases = [
+        "why protein",
+        "benefit of protein",
+        "benefits of protein",
+        "is protein good",
+        "protein is best",
+        "which is best for health",
+        "what is best for muscle",
+        "nutrition advice",
+        "diet advice",
+    ]
+    if any(p in msg for p in advisory_phrases):
+        return True
+    if ("why" in msg or "benefit" in msg or "best" in msg) and "protein" in msg:
+        return True
+    return False
+
+
 def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
     msg = _normalize(message)
     words = msg.split()
@@ -848,6 +867,8 @@ def _detect_intent(message: str, state: ConversationState) -> Optional[str]:
 
     # Strong dietary markers should win.
     if ("difference" in msg or "vs" in msg) and "whey" in msg and "isolate" in msg:
+        return "dietary"
+    if _is_nutrition_advice_query(msg):
         return "dietary"
     if _contains_dietary_marker(msg):
         return "dietary"
@@ -1046,6 +1067,16 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     # Hard guard for Whey vs Isolate comparison question.
     if (("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm):
         entities["intent"] = "dietary"
+    if _contains_dietary_marker(msg_norm):
+        entities["intent"] = "dietary"
+        entities["product"] = None
+        entities["country"] = None
+        entities["pack"] = None
+    if _is_nutrition_advice_query(msg_norm):
+        entities["intent"] = "dietary"
+        entities["product"] = None
+        entities["country"] = None
+        entities["pack"] = None
 
     # Hard guard: category listing requests must stay in discovery flow.
     if _is_category_listing_request(message):
@@ -1063,6 +1094,9 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         and not deterministic.get("country")
         and not deterministic.get("pack")
         and not _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS)
+        and entities.get("intent") not in {"dietary", "where_to_buy", "authenticity"}
+        and not _contains_dietary_marker(msg_norm)
+        and not _is_nutrition_advice_query(msg_norm)
     ):
         entities["intent"] = "discovery"
         entities["product"] = None
@@ -1388,7 +1422,20 @@ def _handle_authenticity() -> str:
     return _grounded_reply(facts)
 
 
-def _handle_dietary() -> str:
+def _handle_dietary(message: str = "") -> str:
+    msg = _normalize(message or "")
+    if _is_nutrition_advice_query(msg):
+        facts = "Optimum Nutrition does not offer nutritional advice, kindly visit a certified nutritionist."
+        return _grounded_reply(facts, strict=True)
+    if "vegan" in msg:
+        facts = "Sorry but we don't have vegan protein at the moment. Please follow us to learn more about our latest products. Thanks"
+        return _grounded_reply(facts, strict=True)
+    if "gluten" in msg:
+        facts = (
+            "Yes Optimum Nutrition Gold Standard 100% Whey is certified gluten-free (only exception is cookies and cream flavor). "
+            "In case of Celiac Disease or Gluten Intolerance, always check with your physician before trying new supplements."
+        )
+        return _grounded_reply(facts, strict=True)
     facts = (
         "Gold Standard 100% Whey is certified gluten-free except Cookies and Cream flavor. "
         "We do not currently offer vegan protein."
@@ -1707,7 +1754,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         msg_norm = _normalize(message)
         if ("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm:
             return finish(_handle_whey_vs_isolate())
-        return finish(_handle_dietary())
+        return finish(_handle_dietary(message))
     if intent == "where_to_buy":
         return finish(_handle_where_to_buy())
     if intent == "smalltalk":
