@@ -1670,11 +1670,19 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
                 or "both" in msg_norm
             )
         )
+        awaiting_country_retry = (
+            state.last_asked == "country"
+            and not entities.get("country")
+            and not entities.get("pack")
+            and not entities.get("product")
+            and len(msg_norm.split()) <= 3
+        )
         if (
             not explicit_non_price
             and (
             expected_slot_filled
             or continuity_hint
+            or awaiting_country_retry
             or
             (
             entities.get("country")
