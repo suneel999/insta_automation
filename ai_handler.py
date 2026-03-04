@@ -1057,6 +1057,13 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     # Guard intent priority: explicit price wording must remain price.
     if _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS) and entities.get("intent") != "price":
         entities["intent"] = "price"
+    # Greeting should never carry transactional slots.
+    if entities.get("intent") == "greeting":
+        entities["product"] = None
+        entities["country"] = None
+        entities["pack"] = None
+        entities["both_packs"] = False
+        entities["category"] = None
     # Explicit website questions should route to where_to_buy and ignore stale slots.
     if _contains_fuzzy_keyword(msg_norm, WHERE_BUY_KEYWORDS):
         entities["intent"] = "where_to_buy"
@@ -1080,6 +1087,14 @@ def extract_entities(message: str, state: ConversationState) -> dict:
 
     # Hard guard: category listing requests must stay in discovery flow.
     if _is_category_listing_request(message):
+        entities["intent"] = "discovery"
+        entities["product"] = None
+        entities["country"] = None
+        entities["pack"] = None
+        entities["both_packs"] = False
+
+    # Broad listing requests should also stay discovery-only (no implicit product).
+    if _is_broad_listing_request(message):
         entities["intent"] = "discovery"
         entities["product"] = None
         entities["country"] = None
