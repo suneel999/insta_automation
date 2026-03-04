@@ -559,7 +559,18 @@ DISCOVERY_KEYWORDS = ["browse", "products", "show products", "what do you have",
 GREETING_KEYWORDS = ["hi", "hello", "hey"]
 AUTH_KEYWORDS = ["original", "authentic", "sticker", "fake", "genuine"]
 DIETARY_KEYWORDS = ["gluten", "vegan", "diet", "nutritionist", "isolate vs whey", "whey vs isolate"]
-WHERE_BUY_KEYWORDS = ["where buy", "where to buy", "where can i find", "find your products", "available at", "where available"]
+WHERE_BUY_KEYWORDS = [
+    "where buy",
+    "where to buy",
+    "where can i find",
+    "find your products",
+    "available at",
+    "where available",
+    "website",
+    "web site",
+    "official site",
+    "official website",
+]
 SMALLTALK_KEYWORDS = ["thanks", "thank you", "ok", "okay", "great", "awesome", "cool", "good morning", "good evening"]
 RESPONSE_STYLE = os.getenv("RESPONSE_STYLE", "friendly_concise")
 
@@ -1025,6 +1036,13 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     # Guard intent priority: explicit price wording must remain price.
     if _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS) and entities.get("intent") != "price":
         entities["intent"] = "price"
+    # Explicit website questions should route to where_to_buy and ignore stale slots.
+    if _contains_fuzzy_keyword(msg_norm, WHERE_BUY_KEYWORDS):
+        entities["intent"] = "where_to_buy"
+        entities["product"] = None
+        entities["country"] = None
+        entities["pack"] = None
+        entities["both_packs"] = False
     # Hard guard for Whey vs Isolate comparison question.
     if (("difference" in msg_norm or "vs" in msg_norm) and "whey" in msg_norm and "isolate" in msg_norm):
         entities["intent"] = "dietary"
@@ -1060,6 +1078,15 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         and _is_context_followup_request(message)
     ):
         entities["category"] = state.selected_category
+
+    # Prevent stale country carry-over from AI memory on non-country turns.
+    if (
+        entities.get("country")
+        and not deterministic.get("country")
+        and state.last_asked != "country"
+        and entities.get("intent") != "price"
+    ):
+        entities["country"] = None
 
     # Continuity guards: in active pricing, do not let AI invent slot switches.
     if state.pending_intent == "price":
