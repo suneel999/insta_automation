@@ -1098,7 +1098,9 @@ def extract_entities(message: str, state: ConversationState) -> dict:
     return deterministic
 
 
-def _grounded_reply(facts: str, style_instruction: str = "") -> str:
+def _grounded_reply(facts: str, style_instruction: str = "", strict: bool = False) -> str:
+    if strict:
+        return facts
     if not client:
         return facts
     style_hint = (
@@ -1255,7 +1257,7 @@ def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
                 f"From {state.selected_category}, choose one: {items}. I’ll continue right after that.",
             ])
             state.last_asked = "product_from_category"
-            return _grounded_reply(facts)
+            return _grounded_reply(facts, strict=True)
 
         facts = pick([
             "I just need the product name to continue. You can send Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey.",
@@ -1266,7 +1268,7 @@ def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
                 "Which product price do you want? You can choose Gold Standard 100% Whey, Serious Mass, or Platinum HydroWhey.",
                 "Which product price should I check? Options: Gold Standard 100% Whey, Serious Mass, Platinum HydroWhey.",
             ])
-        return _grounded_reply(facts)
+        return _grounded_reply(facts, strict=True)
 
     if missing_field == "pack":
         facts = pick([
@@ -1278,7 +1280,7 @@ def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
                 f"For {state.selected_product}, which pack do you want: 2LB or 5LB?",
                 f"Got it. Choose the pack for {state.selected_product}: 2LB or 5LB.",
             ])
-        return _grounded_reply(facts)
+        return _grounded_reply(facts, strict=True)
 
     facts = pick([
         "I need your country to give exact pricing: UAE, KSA, or Egypt.",
@@ -1289,7 +1291,7 @@ def _ask_for_missing(state: ConversationState, missing_field: str) -> str:
             "To give the exact price, which country are you in: UAE, KSA, or Egypt?",
             "Which country should I check pricing for: UAE, KSA, or Egypt?",
         ])
-    return _grounded_reply(facts)
+    return _grounded_reply(facts, strict=True)
 
 
 def _needs_pack(product: str) -> bool:
@@ -1335,7 +1337,7 @@ def _handle_discovery(state: ConversationState) -> str:
             f"Our {category} products are: {items}. Send one product name and I’ll continue.",
         ])
         state.last_asked = f"discovery_{category}"
-        return _grounded_reply(facts)
+        return _grounded_reply(facts, strict=True)
 
     facts = pick([
         "Our main categories are Protein, Energy & Aminos, Pre-Workout, Recovery, and Vitamins/Health. Which category do you want?",
@@ -1348,7 +1350,7 @@ def _handle_discovery(state: ConversationState) -> str:
             "Share one category to continue: Protein, Energy & Aminos, Pre-Workout, Recovery, or Vitamins/Health.",
         ])
     state.last_asked = "discovery_generic"
-    return _grounded_reply(facts)
+    return _grounded_reply(facts, strict=True)
 
 
 def _handle_authenticity() -> str:
