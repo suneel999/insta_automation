@@ -995,6 +995,21 @@ def extract_entities(message: str, state: ConversationState) -> dict:
         entities["pack"] = None
         entities["both_packs"] = False
 
+    # Hard guard: category-only turns must never drift into product pricing.
+    # Example: "I like explore in recovery" should list recovery products.
+    if (
+        deterministic.get("category")
+        and not deterministic.get("product")
+        and not deterministic.get("country")
+        and not deterministic.get("pack")
+        and not _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS)
+    ):
+        entities["intent"] = "discovery"
+        entities["product"] = None
+        entities["country"] = None
+        entities["pack"] = None
+        entities["both_packs"] = False
+
     # Continuity guards: in active pricing, do not let AI invent slot switches.
     if state.pending_intent == "price":
         explicit_product = _has_explicit_product_mention(message)
