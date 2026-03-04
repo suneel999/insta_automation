@@ -1022,6 +1022,18 @@ def _validate_ai_entities(ai_entities: dict, state: ConversationState) -> dict:
 
 def extract_entities(message: str, state: ConversationState) -> dict:
     msg_norm = _normalize(message)
+    # Hard greeting priority: exact/simple greetings must reset conversational intent,
+    # even if AI inference tries to continue a previous transactional flow.
+    if _is_greeting(msg_norm) and not _contains_fuzzy_keyword(msg_norm, PRICE_KEYWORDS):
+        return {
+            "intent": "greeting",
+            "product": None,
+            "country": None,
+            "pack": None,
+            "category": None,
+            "both_packs": False,
+        }
+
     deterministic = {
         "intent": _detect_intent(message, state),
         "product": _detect_product(message, state),
@@ -1679,7 +1691,7 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
     if _should_clear_pricing_context(intent):
         _clear_pricing_state(state)
 
-    if intent == "price" or state.pending_intent == "price":
+    if intent == "price" or (state.pending_intent == "price" and intent != "greeting"):
         state.mode = "transaction"
         state.pending_intent = "price"
 
