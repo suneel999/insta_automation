@@ -1411,6 +1411,23 @@ def _clear_pricing_state(state: ConversationState) -> None:
     state.mode = "discovery"
 
 
+def _reset_session_state(state: ConversationState) -> None:
+    state.mode = "discovery"
+    state.pending_intent = None
+    state.selected_category = None
+    state.selected_product = None
+    state.selected_pack = None
+    state.selected_country = None
+    state.last_asked = None
+    state.last_product_mentioned = None
+    state.last_pack_mentioned = None
+    state.last_country_mentioned = None
+    state.last_priced_product = None
+    state.last_priced_pack = None
+    state.last_priced_country = None
+    state.requested_both_packs = False
+
+
 def get_on_ai_response(message: str, user_id: str = "default") -> str:
     state, history = _load_user_context(user_id)
 
@@ -1637,6 +1654,12 @@ def get_on_ai_response(message: str, user_id: str = "default") -> str:
         return finish(_handle_discovery(state))
 
     if intent == "greeting":
+        # Demo behavior: pure greeting starts a fresh session context.
+        if _is_greeting(_normalize(message)) and len(_normalize(message).split()) <= 4:
+            _reset_session_state(state)
+            history.clear()
+            history.append(message)
+            return finish(_handle_smalltalk(message, state))
         if state.pending_intent == "price":
             # Treat a pure greeting as a fresh turn and drop stale pricing slots.
             if not any(

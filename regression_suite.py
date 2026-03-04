@@ -39,6 +39,25 @@ def run_scenario(scenario_id, turns):
 SCENARIOS = [
     [
         {"user": "hi", "expect_any": ["welcome", "hello"]},
+        {"user": "price whey", "expect_any": ["2lb", "5lb"]},
+        {"user": "2lb", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "uae", "expect_any": ["aed 156.45"]},
+        {"user": "and in ksa", "expect_any": ["sar 248.40"]},
+        {"user": "what about 5lb", "expect_any": ["sar 389.85"]},
+        {"user": "hi", "expect_any": ["welcome", "hello"]},
+        {"user": "what about egypt", "expect_any": ["which product", "product price"]},
+    ],
+    [
+        {"user": "list all products", "expect_any": ["protein", "energy & aminos", "vitamins/health"]},
+        {"user": "recovery", "expect_any": ["casein", "glutamine", "bcaa"]},
+        {"user": "price bcaa", "expect_any": ["which country", "uae, ksa, or egypt"]},
+        {"user": "egypt", "expect_any": ["550 le"]},
+        {"user": "and uae", "expect_any": ["aed 136.50"]},
+        {"user": "hi", "expect_any": ["welcome", "hello"]},
+        {"user": "and ksa", "expect_any": ["which product", "product price"]},
+    ],
+    [
+        {"user": "hi", "expect_any": ["welcome", "hello"]},
         {"user": "price", "expect_any": ["which product", "product price"]},
         {"user": "whey", "expect_any": ["2lb", "5lb"]},
         {"user": "2lb", "expect_any": ["which country", "uae, ksa, or egypt"]},
